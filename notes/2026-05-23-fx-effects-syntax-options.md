@@ -322,6 +322,18 @@ Weaknesses:
 - `given` is a new keyword.
 - Long signatures can become wide.
 
+Effect operations are ordinary lowercase namespace symbols. Operation call sites use normal function-call syntax and normal namespace/type-directed disambiguation.
+
+V0 effect declarations do not distinguish resumable and non-resumable operations syntactically. Handlers decide whether to resume.
+
+V0 handler clauses receive `resume` explicitly. Resumption is never implicit in handler clause return values.
+
+Effect rows list effect names/capabilities only, such as `<Raise>` or `<Emit a>`. Operation signatures live in `effect` declarations, not in effect rows.
+
+`with` is general trailing-action sugar for any function whose final parameter is an action/thunk. The type checker rejects `with` when the target function's final parameter is not an action.
+
+V0 context rows use unique plain field names, aligned with record rows. Functions that need two contextual values with the same conceptual role should give them distinct names, such as `eq-a` and `eq-b`; qualified context names are deferred.
+
 ### Combined option 2: one `requires` clause
 
 ```fx
@@ -414,8 +426,9 @@ export effect Raise
 safe-divide(x: Int, y: Int) : Int with <Raise>
   if y == 0 then raise("divide by zero") else x / y
 
-export context Clock
-  now() : Instant
+export type Clock = {
+  now: () -> Instant
+}
 
 timestamp(message: Text) : Text given { clock: Clock }
   std.instant.to-text(clock.now()) ++ " " ++ message
@@ -844,14 +857,3 @@ with given each(init)
 with given each(init, cleanup)
   body
 ```
-
-Open questions to resolve next:
-
-- Should effect declarations be `effect Raise` or `ability Raise`?
-- Should coeffect declarations be `context Clock`, `implicit Clock`, or just ordinary types introduced by `given`?
-- Should effect operations be lowercase namespace symbols, for example `raise(...)`, or qualified constructor-like symbols, for example `Raise.raise(...)`?
-- Should v0 distinguish resumable and non-resumable operations syntactically?
-- Should handler clauses receive `resume` explicitly, or should resumption be implicit for simple operations?
-- Should the effect row use effect names only, like `<Raise>`, or operation-shaped entries, like `<Raise(Text)>`?
-- Should `with` be general trailing-action sugar for all functions, or restricted to handler-like functions?
-- Should a function be allowed to require two context entries with the same plain name but different qualified names, as in Koka's `?a/eq` and `?b/eq` pattern?
