@@ -1,0 +1,17 @@
+[package]
+name = "fx-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "fx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+fx-core.workspace = true
+fx-syntax.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+walkdir.workspace = true

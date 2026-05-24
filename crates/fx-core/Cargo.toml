@@ -1,0 +1,10 @@
+[package]
+name = "fx-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+fx-syntax.workspace = true
+serde.workspace = true
+walkdir.workspace = true

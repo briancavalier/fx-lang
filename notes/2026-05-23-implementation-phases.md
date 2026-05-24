@@ -399,8 +399,43 @@ be treated as small syntax additions.
   the checker.
 - Keep row kinds distinct internally even when surface syntax is visually
   uniform.
-- Add runnable example files for each phase and use them as language-server
+- Add small example programs for each phase and use them as language-server
   fixtures.
+- Create phase-focused example artifacts before the type checker supports them
+  when useful. Treat those examples as goal targets and acceptance tests, then
+  promote them from expected-failing fixtures to expected-passing fixtures as
+  parser, checker, diagnostics, hover, and go-to-definition support catches up.
 - Treat diagnostics as part of the feature, not polish after the fact.
 - Do not add a feature to the accepted grammar until the type checker and LSP
   can explain it well enough for users to recover from mistakes.
+
+## Phase example artifact protocol
+
+Each phase should maintain small `.fx` programs under `examples/phase-N/` that
+focus on the features being implemented in that phase.
+
+Example artifacts may lead the implementation. When an example uses features
+that are not supported yet, keep it as a documented goal target rather than
+weakening it to match the current checker. As support lands, wire the example
+into parser, type checker, diagnostics, hover, and go-to-definition tests.
+
+Prefer examples that combine several phase features in realistic but compact
+code. Avoid using later-phase features in earlier-phase examples unless the
+example is intentionally documenting a boundary that should still fail.
+
+## Phase learning log protocol
+
+During each phase, maintain a dated phase note under `notes/` for decisions,
+surprises, rejected approaches, and implications for later phases.
+
+Use this shape:
+
+- Decision:
+- Context:
+- Applies to phase(s):
+- Future implication:
+- Revisit when:
+
+At the end of each implementation session, update the active phase note before
+moving on. When a phase ends, summarize any durable decisions that should be
+remembered across future sessions.

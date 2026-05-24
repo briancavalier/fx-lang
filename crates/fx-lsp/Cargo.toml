@@ -1,0 +1,15 @@
+[package]
+name = "fx-lsp"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "fx-lsp"
+path = "src/main.rs"
+
+[dependencies]
+fx-core.workspace = true
+fx-syntax.workspace = true
+tokio.workspace = true
+tower-lsp.workspace = true
