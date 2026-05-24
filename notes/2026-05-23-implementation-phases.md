@@ -1,0 +1,406 @@
+# Implementation phases
+
+Date: 2026-05-23
+
+## Purpose
+
+This plan breaks the current language design into implementation phases. The
+goal is to reach a useful type checker and language server incrementally,
+without forcing the parser, row system, effects, coeffects, and named scopes to
+land all at once.
+
+Each phase should leave the language in a coherent state with runnable examples,
+diagnostics, hover, and go-to-definition for the features implemented so far.
+
+## Sequencing rationale
+
+Start with the ordinary language core, then add the shared row machinery, then
+effects, then named scopes, then coeffects.
+
+Rows come before effects because records, variants, effect rows, and context
+rows all depend on the same underlying row-kinding and row-unification ideas.
+
+Named scopes come before coeffects because they are an extension of the effect
+system itself: scoped effect families are still effect requirements. Coeffects
+add a second requirement system and should wait until ordinary effects and
+scoped effects are stable.
+
+## Phase 1: Basic language core
+
+Goal: working parser, type checker, and language server for the non-effect
+language.
+
+This phase should establish the concrete source grammar, module graph, symbol
+index, core AST, and annotation-driven type checker.
+
+Include:
+
+- source files as modules;
+- imports and inline exports;
+- top-level value and function declarations;
+- local immutable bindings;
+- lambdas and function calls;
+- `if` expressions;
+- `match` expressions;
+- primitive types: `Unit`, `Bool`, `Int`, and `Text`;
+- list values and `List a`;
+- records, record field access, and record update;
+- closed variant types and constructors;
+- basic pattern checking for literals, variables, lists, records, variants, and
+  tuples if tuples are included in the initial grammar;
+- explicit top-level type annotations;
+- local type inference inside annotated declarations;
+- a small prelude with the operators and functions needed by examples.
+
+Defer:
+
+- open record rows;
+- open variant rows;
+- variadic tuple packs;
+- algebraic effects;
+- handlers;
+- coeffects and `given`;
+- named scopes;
+- refs and mutation unless needed for a minimal example.
+
+Type checker success criteria:
+
+- rejects unknown names, duplicate definitions, unresolved imports, arity
+  mismatches, and ordinary type mismatches;
+- checks top-level declarations against their annotations;
+- infers local binding types where enough information is available;
+- resolves imported names and fully qualified names;
+- produces stable types for hovers.
+
+Language server success criteria:
+
+- parse diagnostics with useful spans;
+- type diagnostics with useful spans;
+- hover for local bindings, top-level declarations, types, constructors, and
+  imported symbols;
+- go-to-definition for local names, imported names, constructors, and types;
+- document symbols and workspace symbols for modules.
+
+Example target:
+
+```fx
+import std.io
+
+export type Todo = {
+  id: Int,
+  title: Text,
+  done: Bool
+}
+
+export type TodoResult a = < Ok(a), NotFound(Int) >
+
+summarize(todo: Todo) : Text
+  status =
+    if todo.done then "done" else "open"
+
+  todo.title ++ " [" ++ status ++ "]"
+
+find(wanted: Int, todos: List Todo) : TodoResult Todo
+  match todos
+    [] ->
+      NotFound(wanted)
+
+    [todo, ...rest] ->
+      if todo.id == wanted then Ok(todo) else find(wanted, rest)
+```
+
+## Phase 2: Rows
+
+Goal: add the shared row machinery before effects depend on it.
+
+This phase should make records and variants meaningfully row-polymorphic while
+keeping effects out of scope.
+
+Include:
+
+- distinct row kinds for records, variants, and tuples if tuple rows are kept in
+  v0;
+- open record types such as `{ name: Text, ...r }`;
+- open variant types such as `< Ok(a), Error(Text), ...r >`;
+- final-only row spreads;
+- row variable scoping and generalization;
+- row unification;
+- record field access against open rows;
+- record update against open rows;
+- variant construction and matching against open rows;
+- diagnostics for missing fields, unknown fields, unknown cases, duplicate row
+  labels, and incompatible row kinds.
+
+Defer:
+
+- effect rows;
+- context rows;
+- variadic tuple packs if they complicate row unification too much;
+- advanced exhaustiveness and redundancy checking beyond a conservative first
+  pass.
+
+Type checker success criteria:
+
+- checks functions polymorphic over record tails;
+- checks functions polymorphic over variant tails;
+- prevents record rows, variant rows, tuple rows, effect rows, and context rows
+  from being accidentally unified across kinds;
+- reports row errors in terms users can understand.
+
+Language server success criteria:
+
+- hover shows compact open-row types;
+- diagnostics identify the specific missing or incompatible row member;
+- go-to-definition works for variant constructors across modules.
+
+Example target:
+
+```fx
+greet(person: { name: Text, ...r }) : Text
+  "Hello, " ++ person.name
+
+message(result: < Ok(a), Missing(), Error(Text), ...r >) : Text
+  match result
+    Ok(_) -> "ok"
+    Missing() -> "missing"
+    Error(text) -> text
+    other -> "unknown"
+```
+
+## Phase 3: Effects
+
+Goal: ordinary algebraic effect declarations and effect rows.
+
+This phase introduces effect requirements but not scoped effect families or
+coeffects.
+
+Use the `with <effects>` notation for v0 effect rows. The older `! <effects>`
+spelling should be treated as an abandoned option unless the design is reopened.
+
+Include:
+
+- `effect` declarations;
+- operation symbols exported by effect declarations;
+- operation call sites using ordinary function-call syntax;
+- function result effects, such as `a with <Console>`;
+- open effect rows, such as `a with <Console, ...e>`;
+- function types with effects, such as `() -> a with <Console, ...e>`;
+- operation resolution by imported name, namespace, and expected effect row;
+- basic handlers as function-like values;
+- explicit `resume` in handler clauses;
+- trailing-action sugar: `with f(args) body`;
+- diagnostics for unhandled effects, unknown operations, ambiguous operations,
+  invalid `with` usage, and handler return mismatches.
+
+Defer:
+
+- scoped effect declarations;
+- named scopes;
+- coeffects;
+- effect masking;
+- syntactic distinction between resumable and non-resumable operations;
+- handler literals unless needed as an implementation target;
+- advanced laws or restrictions around multi-shot resumptions.
+
+Type checker success criteria:
+
+- tracks effect rows through function calls;
+- verifies effect-polymorphic functions;
+- verifies a handler removes only the effect it handles and adds any effects its
+  clauses perform;
+- rejects running an effectful expression where a pure expression is required;
+- reports missing effect requirements with actionable messages.
+
+Language server success criteria:
+
+- hover shows value type plus effect row;
+- go-to-definition from operation calls to operation declarations;
+- diagnostics point at the call site that introduces an unhandled effect;
+- completion can suggest operations from imported effect declarations.
+
+Example target:
+
+```fx
+export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x / y
+
+catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
+  handle action()
+    raise(_message, _resume) ->
+      default
+
+    return(value) ->
+      value
+
+value : Int
+  with catch(0)
+    safe-divide(10, 0)
+```
+
+## Phase 4: Named scopes
+
+Goal: scoped effect families and scope-polymorphic effect rows.
+
+This phase implements the named-scopes v0 design after ordinary effect rows and
+handlers are stable.
+
+Include:
+
+- `scoped effect Effect s ...` declarations;
+- `scope Name` declarations;
+- `scope Name : ProtocolShape` annotations;
+- scope identities as type-level values suitable for effect rows;
+- scoped effect rows such as `a with <State Counter Int>`;
+- scope-polymorphic rows such as `a with <State s Int, ...e>`;
+- explicit scoped operation calls first;
+- `with-scope scope` as a default-scope provider for operation elision;
+- operation elision only when the scoped effect family and active scope are
+  unambiguous;
+- handler typing that removes only `Effect Scope`, leaving other scopes
+  unhandled;
+- diagnostics for unknown scopes, invalid protocol annotations, ambiguous
+  scoped operations, and scope mismatches.
+
+Defer:
+
+- fresh scope creation;
+- scope masking;
+- first-class handler names;
+- non-escape checking for locally generated scopes;
+- multiple protocol annotations per scope unless the design explicitly chooses
+  them.
+
+Type checker success criteria:
+
+- checks concrete scoped effect rows;
+- checks reusable helpers polymorphic over a scope variable;
+- verifies scoped handlers affect only the named scope they handle;
+- reports ambiguity when two active scopes could satisfy the same unqualified
+  operation;
+- elaborates `with-scope` operation elision to explicit scoped operation calls.
+
+Language server success criteria:
+
+- hover shows scoped effect rows clearly;
+- go-to-definition from a scope use to its declaration;
+- go-to-definition from a scoped operation call to the operation declaration;
+- diagnostics distinguish missing effect family from missing scope;
+- code actions can later suggest adding an explicit scope argument.
+
+Example target:
+
+```fx
+export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter : State Int
+
+increment() : Int with <State Counter Int>
+  with-scope Counter
+    n = get()
+    put(n + 1)
+    n
+```
+
+## Phase 5: Coeffects and `given`
+
+Goal: contextual requirements after effects and scoped effects are stable.
+
+This phase adds a second requirement system for contextual values.
+
+Include:
+
+- context rows such as `a given { clock: Clock }`;
+- open context rows such as `a given { clock: Clock, ...c }`;
+- functions with both effects and context, such as
+  `a with <Console, ...e> given { clock: Clock, ...c }`;
+- scoped providers: `with given { clock = system-clock() } body`;
+- name-and-type contextual resolution;
+- contextual values visible by name inside the provider body;
+- named provider functions using trailing-action sugar;
+- diagnostics for missing contextual values, ambiguous contextual values,
+  duplicate context fields, and invalid provider expressions.
+
+Defer:
+
+- `given each`;
+- resourceful branch-local context;
+- module-level contextual exports;
+- final `given { ... }` call arguments;
+- ordinary named arguments for contextual requirements;
+- qualified contextual names.
+
+Type checker success criteria:
+
+- tracks context rows through function calls;
+- resolves a required context field by name and type;
+- allows scoped providers to satisfy context requirements for their action;
+- checks functions polymorphic over context tails;
+- reports missing and ambiguous context requirements clearly.
+
+Language server success criteria:
+
+- hover shows context rows in signatures;
+- go-to-definition from an implicitly resolved context use to its provider;
+- diagnostics point to the call requiring missing context;
+- tooling can eventually show inserted contextual arguments.
+
+Example target:
+
+```fx
+export type Clock = {
+  now: () -> Instant
+}
+
+timestamp(message: Text) : Text given { clock: Clock }
+  std.instant.to-text(clock.now()) ++ " " ++ message
+
+main() : Unit with <Console>
+  with given { clock = system-clock() }
+    print-line(timestamp("started"))
+```
+
+## Phase 6: Advanced surface
+
+Goal: fill in power features after the core language, rows, effects, scopes,
+and coeffects are usable.
+
+Candidates:
+
+- variadic tuple packs;
+- richer tuple rows;
+- refs and mutation;
+- stronger exhaustiveness and redundancy checking;
+- handler literals;
+- documented multi-shot semantics and any needed static restrictions;
+- `given each`;
+- resourceful branch-local context;
+- fresh scopes and non-escape checking;
+- scope masking;
+- first-class handler names;
+- standard library expansion;
+- richer code actions and refactors.
+
+Each candidate should get a short design note before implementation. Several of
+these features interact with effect handlers and resumptions, so they should not
+be treated as small syntax additions.
+
+## Cross-phase implementation notes
+
+- Prefer an annotation-driven type checker at first: require top-level
+  annotations and infer local bindings.
+- Keep the parser recovery-friendly for the language server from the start.
+- Maintain a desugared core AST so surface choices like trailing-action `with`,
+  scoped operation elision, and contextual insertion do not spread throughout
+  the checker.
+- Keep row kinds distinct internally even when surface syntax is visually
+  uniform.
+- Add runnable example files for each phase and use them as language-server
+  fixtures.
+- Treat diagnostics as part of the feature, not polish after the fact.
+- Do not add a feature to the accepted grammar until the type checker and LSP
+  can explain it well enough for users to recover from mistakes.
