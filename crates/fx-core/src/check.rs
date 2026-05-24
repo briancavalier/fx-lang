@@ -1,9 +1,13 @@
-use crate::module::{IndexedModule, ModuleGraph, SymbolKind};
+use crate::module::{IndexedModule, ModuleGraph, Symbol, SymbolKind};
+use crate::resolve::{
+    SymbolTables, qualified_expr_name, qualified_root_is_local, resolve_visible_symbol,
+    resolve_workspace,
+};
 use fx_syntax::ast::*;
 use fx_syntax::diagnostic::Diagnostic;
 use fx_syntax::span::Span;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
@@ -27,16 +31,21 @@ pub enum Type {
 }
 
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
-    let mut diagnostics = graph.diagnostics.clone();
+    let resolved = resolve_workspace(graph);
+    let mut diagnostics = resolved.diagnostics;
     let mut module_types = BTreeMap::new();
+    let symbol_types = collect_symbol_types(graph);
     let constructor_arities = collect_constructor_arities(graph);
+    let symbol_tables = SymbolTables::new(graph);
 
     for module in graph.modules.values() {
         let mut checker = ModuleChecker {
             module,
             diagnostics: Vec::new(),
-            top_level: collect_top_level_types(module),
+            top_level: collect_visible_types(module, &symbol_tables, &symbol_types),
+            symbol_types: &symbol_types,
             constructor_arities: &constructor_arities,
+            symbol_tables: &symbol_tables,
         };
         let types = checker.check();
         diagnostics.extend(checker.diagnostics);
@@ -53,7 +62,9 @@ struct ModuleChecker<'a> {
     module: &'a IndexedModule,
     diagnostics: Vec<Diagnostic>,
     top_level: BTreeMap<String, Type>,
+    symbol_types: &'a BTreeMap<String, Type>,
     constructor_arities: &'a BTreeMap<String, usize>,
+    symbol_tables: &'a SymbolTables,
 }
 
 impl ModuleChecker<'_> {
@@ -91,18 +102,15 @@ impl ModuleChecker<'_> {
     }
 
     fn infer_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>) -> Type {
+        if let Some(name) = qualified_expr_name(expr)
+            && name.contains('.')
+            && !qualified_root_is_local(&name, &env.keys().cloned().collect::<BTreeSet<_>>())
+        {
+            return self.resolve_expr_name(&name, expr.span(), env);
+        }
+
         match expr {
-            Expr::Name(name) => env
-                .get(&name.text)
-                .cloned()
-                .or_else(|| self.constructor_type(&name.text, 0, name.span))
-                .unwrap_or_else(|| {
-                    self.diagnostics.push(Diagnostic::new(
-                        name.span,
-                        format!("unknown name `{}`", name.text),
-                    ));
-                    Type::Unknown
-                }),
+            Expr::Name(name) => self.resolve_expr_name(&name.text, name.span, env),
             Expr::Int { .. } => Type::Int,
             Expr::Text { .. } => Type::Text,
             Expr::Bool { .. } => Type::Bool,
@@ -149,52 +157,38 @@ impl ModuleChecker<'_> {
                     Type::Unknown
                 }
             },
-            Expr::Call { callee, args, span } => {
-                let callee_name = match callee.as_ref() {
-                    Expr::Name(name) => Some(name.text.as_str()),
-                    _ => None,
-                };
-                if let Some(name) = callee_name
-                    && let Some(ty) = self.constructor_type(name, args.len(), *span)
-                {
-                    for arg in args {
-                        self.infer_expr(arg, env);
+            Expr::Call { callee, args, span } => match self.infer_expr(callee, env) {
+                Type::Function(params, result) => {
+                    if params.len() != args.len() {
+                        self.diagnostics.push(Diagnostic::new(
+                            *span,
+                            format!(
+                                "arity mismatch: expected {} arguments, found {}",
+                                params.len(),
+                                args.len()
+                            ),
+                        ));
                     }
-                    return ty;
-                }
-                match self.infer_expr(callee, env) {
-                    Type::Function(params, result) => {
-                        if params.len() != args.len() {
+                    for (arg, expected) in args.iter().zip(params) {
+                        let found = self.infer_expr(arg, env);
+                        if !compatible(&found, &expected) {
                             self.diagnostics.push(Diagnostic::new(
-                                *span,
-                                format!(
-                                    "arity mismatch: expected {} arguments, found {}",
-                                    params.len(),
-                                    args.len()
-                                ),
+                                arg.span(),
+                                format!("expected `{expected}`, found `{found}`"),
                             ));
                         }
-                        for (arg, expected) in args.iter().zip(params) {
-                            let found = self.infer_expr(arg, env);
-                            if !compatible(&found, &expected) {
-                                self.diagnostics.push(Diagnostic::new(
-                                    arg.span(),
-                                    format!("expected `{expected}`, found `{found}`"),
-                                ));
-                            }
-                        }
-                        *result
                     }
-                    Type::Unknown => Type::Unknown,
-                    other => {
-                        self.diagnostics.push(Diagnostic::new(
-                            callee.span(),
-                            format!("cannot call non-function value of type `{other}`"),
-                        ));
-                        Type::Unknown
-                    }
+                    *result
                 }
-            }
+                Type::Unknown => Type::Unknown,
+                other => {
+                    self.diagnostics.push(Diagnostic::new(
+                        callee.span(),
+                        format!("cannot call non-function value of type `{other}`"),
+                    ));
+                    Type::Unknown
+                }
+            },
             Expr::If {
                 condition,
                 then_branch,
@@ -324,32 +318,121 @@ impl ModuleChecker<'_> {
         }
         Some(Type::Unknown)
     }
+
+    fn resolve_expr_name(&mut self, name: &str, span: Span, env: &BTreeMap<String, Type>) -> Type {
+        if let Some(ty) = env.get(name) {
+            return ty.clone();
+        }
+
+        match resolve_visible_symbol(self.module, self.symbol_tables, name, None) {
+            Ok(Some(symbol)) => self.type_for_symbol(&symbol),
+            Ok(None) => Type::Unknown,
+            Err(_) => Type::Unknown,
+        }
+        .or_constructor(name, span, self)
+    }
+
+    fn type_for_symbol(&self, symbol: &Symbol) -> Type {
+        self.symbol_types
+            .get(&symbol.qualified_name)
+            .cloned()
+            .unwrap_or(Type::Unknown)
+    }
 }
 
-fn collect_top_level_types(module: &IndexedModule) -> BTreeMap<String, Type> {
-    let mut env = BTreeMap::new();
-    for item in &module.parsed.module.items {
-        match item {
-            Item::Type(decl) => {
-                env.insert(decl.name.text.clone(), Type::Named(decl.name.text.clone()));
+trait ConstructorFallback {
+    fn or_constructor(self, name: &str, span: Span, checker: &mut ModuleChecker<'_>) -> Type;
+}
+
+impl ConstructorFallback for Type {
+    fn or_constructor(self, name: &str, span: Span, checker: &mut ModuleChecker<'_>) -> Type {
+        if !matches!(self, Type::Unknown) {
+            return self;
+        }
+        checker
+            .constructor_type(name, 0, span)
+            .unwrap_or(Type::Unknown)
+    }
+}
+
+fn collect_visible_types(
+    module: &IndexedModule,
+    symbols: &SymbolTables,
+    symbol_types: &BTreeMap<String, Type>,
+) -> BTreeMap<String, Type> {
+    let mut env = collect_local_types(module, symbol_types);
+
+    for import in &module.imports {
+        if let Some(exports) = symbols.exported(import) {
+            for symbol in exports.values() {
+                if let Some(ty) = symbol_types.get(&symbol.qualified_name) {
+                    env.entry(symbol.name.clone()).or_insert_with(|| ty.clone());
+                }
             }
-            Item::Value(decl) => {
-                let params = decl
-                    .params
-                    .iter()
-                    .map(|param| lower_type(&param.annotation))
-                    .collect();
-                let result = lower_type(&decl.annotation);
-                env.insert(
-                    decl.name.text.clone(),
-                    Type::Function(params, Box::new(result)),
-                );
-            }
-            Item::Import(_) => {}
         }
     }
+
+    for (qualified, ty) in symbol_types {
+        env.entry(qualified.clone()).or_insert_with(|| ty.clone());
+    }
+
     env.insert("unit".to_string(), Type::Unit);
     env
+}
+
+fn collect_local_types(
+    module: &IndexedModule,
+    symbol_types: &BTreeMap<String, Type>,
+) -> BTreeMap<String, Type> {
+    module
+        .symbols
+        .iter()
+        .filter_map(|symbol| {
+            symbol_types
+                .get(&symbol.qualified_name)
+                .map(|ty| (symbol.name.clone(), ty.clone()))
+        })
+        .collect()
+}
+
+fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
+    let mut types = BTreeMap::new();
+    for module in graph.modules.values() {
+        for item in &module.parsed.module.items {
+            match item {
+                Item::Type(decl) => {
+                    types.insert(
+                        format!("{}.{}", module.name, decl.name.text),
+                        Type::Named(decl.name.text.clone()),
+                    );
+                    if let TypeExpr::Variant { cases, .. } = &decl.body {
+                        let result = lower_named_type_app(&decl.name.text, &decl.params);
+                        for case in cases {
+                            let params = case.payload.iter().map(lower_type).collect::<Vec<_>>();
+                            types.insert(
+                                format!("{}.{}", module.name, case.name.text),
+                                Type::Function(params, Box::new(result.clone())),
+                            );
+                        }
+                    }
+                }
+                Item::Value(decl) => {
+                    let params = decl
+                        .params
+                        .iter()
+                        .map(|param| lower_type(&param.annotation))
+                        .collect();
+                    let result = lower_type(&decl.annotation);
+                    types.insert(
+                        format!("{}.{}", module.name, decl.name.text),
+                        Type::Function(params, Box::new(result)),
+                    );
+                }
+                Item::Import(_) => {}
+            }
+        }
+    }
+    types
 }
 
 fn collect_constructor_arities(graph: &ModuleGraph) -> BTreeMap<String, usize> {
@@ -415,6 +498,22 @@ fn lower_type(ty: &TypeExpr) -> Type {
                 .collect(),
         ),
         TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => Type::Unknown,
+    }
+}
+
+fn lower_named_type_app(name: &str, params: &[Name]) -> Type {
+    if params.is_empty() {
+        Type::Named(name.to_string())
+    } else {
+        Type::Named(format!(
+            "{} {}",
+            name,
+            params
+                .iter()
+                .map(|param| param.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ))
     }
 }
 

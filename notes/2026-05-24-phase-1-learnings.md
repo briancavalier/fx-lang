@@ -64,3 +64,26 @@ evidence that produced them.
   artifacts should consistently say `fx`.
 - Revisit when: Internal implementation names need to distinguish the language
   project from the broader `fx` ecosystem.
+
+- Decision: Add resolver as a distinct core phase between symbol indexing and
+  type checking.
+- Context: The resolver now builds per-module references from local symbols,
+  imported exported symbols, and fully qualified names. `check_workspace`
+  consumes resolver diagnostics instead of duplicating unknown-name checks.
+- Applies to phase(s): Phase 1.
+- Future implication: Hover, go-to-definition, and checker diagnostics should
+  use the same resolved references rather than rebuilding name lookup in each
+  subsystem.
+- Revisit when: Type-directed disambiguation is implemented for ambiguous
+  imported names.
+
+- Decision: Fully qualified cross-module names resolve only to exported
+  symbols; private symbols remain module-local.
+- Context: The v0 module design says fully qualified names do not require an
+  import, but non-exported declarations remain local to their module.
+- Applies to phase(s): Phase 1.
+- Future implication: LSP go-to-definition should reject or diagnose
+  `other.private-name` the same way the resolver does, even though the symbol is
+  present in the internal module index.
+- Revisit when: Friend modules, test visibility, or package-private visibility
+  are considered.
