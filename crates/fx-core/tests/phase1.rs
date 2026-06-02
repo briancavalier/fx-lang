@@ -155,6 +155,126 @@ fn does_not_resolve_private_cross_module_symbols() {
     );
 }
 
+#[test]
+fn checks_record_alias_field_access() {
+    let result = check_single(
+        "record.fx",
+        r#"type Todo = {
+  id: Int,
+  title: Text
+}
+
+get-id(todo: Todo) : Int
+  todo.id
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_missing_record_fields_through_aliases() {
+    let result = check_single(
+        "record.fx",
+        r#"type Todo = {
+  id: Int
+}
+
+bad(todo: Todo) : Int
+  todo.done
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown record field `done`"))
+    );
+}
+
+#[test]
+fn reports_constructor_arity_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad() : Result
+  Ok()
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("arity mismatch"))
+    );
+}
+
+#[test]
+fn reports_constructor_payload_type_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad() : Result
+  Ok("nope")
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
+    );
+}
+
+#[test]
+fn reports_unknown_variant_pattern_constructors() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad(result: Result) : Int
+  match result
+    Nope(value) ->
+      value
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("constructor `Nope` is not part of `Result`")
+    }));
+}
+
+#[test]
+fn reports_match_arm_result_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad(result: Result) : Int
+  match result
+    Ok(value) ->
+      value
+
+    Missing() ->
+      "missing"
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("match arm type mismatch"))
+    );
+}
+
 fn todo_graph() -> fx_core::ModuleGraph {
     index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -170,4 +290,12 @@ fn source(path: &str, source: &str) -> SourceFile {
         path: PathBuf::from(path),
         source: source.to_string(),
     }
+}
+
+fn check_single(path: &str, source_text: &str) -> fx_core::CheckResult {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source(path, source_text)],
+    );
+    check_workspace(&graph)
 }

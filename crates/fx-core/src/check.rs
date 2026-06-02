@@ -22,7 +22,7 @@ pub enum Type {
     Int,
     Text,
     List(Box<Type>),
-    Named(String),
+    Named { name: String, args: Vec<Type> },
     Var(String),
     Record(Vec<(String, Type)>),
     Variant(Vec<(String, Vec<Type>)>),
@@ -30,10 +30,17 @@ pub enum Type {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypeDef {
+    params: Vec<String>,
+    body: Type,
+}
+
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
     let mut module_types = BTreeMap::new();
+    let type_defs = collect_type_definitions(graph);
     let symbol_types = collect_symbol_types(graph);
     let constructor_arities = collect_constructor_arities(graph);
     let symbol_tables = SymbolTables::new(graph);
@@ -44,6 +51,7 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
             diagnostics: Vec::new(),
             top_level: collect_visible_types(module, &symbol_tables, &symbol_types),
             symbol_types: &symbol_types,
+            type_defs: &type_defs,
             constructor_arities: &constructor_arities,
             symbol_tables: &symbol_tables,
         };
@@ -63,6 +71,7 @@ struct ModuleChecker<'a> {
     diagnostics: Vec<Diagnostic>,
     top_level: BTreeMap<String, Type>,
     symbol_types: &'a BTreeMap<String, Type>,
+    type_defs: &'a BTreeMap<String, TypeDef>,
     constructor_arities: &'a BTreeMap<String, usize>,
     symbol_tables: &'a SymbolTables,
 }
@@ -93,7 +102,7 @@ impl ModuleChecker<'_> {
         }
         let found = self.infer_expr(&decl.body.result, &env);
         let expected = lower_type(&decl.annotation);
-        if !compatible(&found, &expected) {
+        if !self.compatible(&found, &expected) {
             self.diagnostics.push(Diagnostic::new(
                 decl.body.result.span(),
                 format!("expected `{expected}`, found `{found}`"),
@@ -122,7 +131,7 @@ impl ModuleChecker<'_> {
                     .unwrap_or(Type::Unknown);
                 for item in items.iter().skip(1) {
                     let found = self.infer_expr(item, env);
-                    if !compatible(&found, &elem) {
+                    if !self.compatible(&found, &elem) {
                         self.diagnostics.push(Diagnostic::new(
                             item.span(),
                             format!("list item type mismatch: expected `{elem}`, found `{found}`"),
@@ -137,26 +146,29 @@ impl ModuleChecker<'_> {
                     .map(|field| (field.name.text.clone(), self.infer_expr(&field.value, env)))
                     .collect(),
             ),
-            Expr::Field { target, field, .. } => match self.infer_expr(target, env) {
-                Type::Record(fields) => fields
-                    .iter()
-                    .find_map(|(name, ty)| (name == &field.text).then_some(ty.clone()))
-                    .unwrap_or_else(|| {
+            Expr::Field { target, field, .. } => {
+                let target_ty = self.infer_expr(target, env);
+                match self.expand_alias(&target_ty) {
+                    Type::Record(fields) => fields
+                        .iter()
+                        .find_map(|(name, ty)| (name == &field.text).then_some(ty.clone()))
+                        .unwrap_or_else(|| {
+                            self.diagnostics.push(Diagnostic::new(
+                                field.span,
+                                format!("unknown record field `{}`", field.text),
+                            ));
+                            Type::Unknown
+                        }),
+                    Type::Unknown => Type::Unknown,
+                    other => {
                         self.diagnostics.push(Diagnostic::new(
                             field.span,
-                            format!("unknown record field `{}`", field.text),
+                            format!("field access requires a record, found `{other}`"),
                         ));
                         Type::Unknown
-                    }),
-                Type::Named(_) | Type::Unknown => Type::Unknown,
-                other => {
-                    self.diagnostics.push(Diagnostic::new(
-                        field.span,
-                        format!("field access requires a record, found `{other}`"),
-                    ));
-                    Type::Unknown
+                    }
                 }
-            },
+            }
             Expr::Call { callee, args, span } => match self.infer_expr(callee, env) {
                 Type::Function(params, result) => {
                     if params.len() != args.len() {
@@ -169,16 +181,18 @@ impl ModuleChecker<'_> {
                             ),
                         ));
                     }
-                    for (arg, expected) in args.iter().zip(params) {
+                    let mut subst = BTreeMap::new();
+                    for (arg, expected) in args.iter().zip(params.iter()) {
                         let found = self.infer_expr(arg, env);
-                        if !compatible(&found, &expected) {
+                        unify_vars(expected, &found, &mut subst);
+                        if !self.compatible(&found, expected) {
                             self.diagnostics.push(Diagnostic::new(
                                 arg.span(),
                                 format!("expected `{expected}`, found `{found}`"),
                             ));
                         }
                     }
-                    *result
+                    substitute(&result, &subst)
                 }
                 Type::Unknown => Type::Unknown,
                 other => {
@@ -196,7 +210,7 @@ impl ModuleChecker<'_> {
                 ..
             } => {
                 let condition_ty = self.infer_expr(condition, env);
-                if !compatible(&condition_ty, &Type::Bool) {
+                if !self.compatible(&condition_ty, &Type::Bool) {
                     self.diagnostics.push(Diagnostic::new(
                         condition.span(),
                         format!("if condition must be `Bool`, found `{condition_ty}`"),
@@ -204,7 +218,7 @@ impl ModuleChecker<'_> {
                 }
                 let then_ty = self.infer_expr(then_branch, env);
                 let else_ty = self.infer_expr(else_branch, env);
-                if compatible(&then_ty, &else_ty) {
+                if self.compatible(&then_ty, &else_ty) {
                     then_ty
                 } else {
                     self.diagnostics.push(Diagnostic::new(
@@ -226,7 +240,7 @@ impl ModuleChecker<'_> {
                     let arm_ty = self.infer_expr(&arm.value, &arm_env);
                     if matches!(found, Type::Unknown) {
                         found = arm_ty;
-                    } else if !compatible(&found, &arm_ty) {
+                    } else if !self.compatible(&found, &arm_ty) {
                         self.diagnostics.push(Diagnostic::new(
                             arm.value.span(),
                             format!(
@@ -244,7 +258,7 @@ impl ModuleChecker<'_> {
                 let right_ty = self.infer_expr(right, env);
                 match op {
                     BinaryOp::Equal => {
-                        if !compatible(&left_ty, &right_ty) {
+                        if !self.compatible(&left_ty, &right_ty) {
                             self.diagnostics.push(Diagnostic::new(
                                 right.span(),
                                 format!("cannot compare `{left_ty}` with `{right_ty}`"),
@@ -253,7 +267,8 @@ impl ModuleChecker<'_> {
                         Type::Bool
                     }
                     BinaryOp::Concat => {
-                        if !compatible(&left_ty, &Type::Text) || !compatible(&right_ty, &Type::Text)
+                        if !self.compatible(&left_ty, &Type::Text)
+                            || !self.compatible(&right_ty, &Type::Text)
                         {
                             self.diagnostics
                                 .push(Diagnostic::new(expr.span(), "`++` expects `Text` operands"));
@@ -278,9 +293,39 @@ impl ModuleChecker<'_> {
                 env.insert(name.text.clone(), expected.clone());
             }
             Pattern::Constructor { name, args, span } => {
-                self.constructor_type(&name.text, args.len(), *span);
-                for arg in args {
-                    self.bind_pattern(arg, &Type::Unknown, env);
+                let expected_variant = self.expand_alias(expected);
+                if let Type::Variant(cases) = expected_variant {
+                    if let Some((_, payload)) =
+                        cases.iter().find(|(case_name, _)| case_name == &name.text)
+                    {
+                        if payload.len() != args.len() {
+                            self.diagnostics.push(Diagnostic::new(
+                                *span,
+                                format!(
+                                    "constructor `{}` expects {} arguments, found {}",
+                                    name.text,
+                                    payload.len(),
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        for (arg, expected) in args.iter().zip(payload) {
+                            self.bind_pattern(arg, expected, env);
+                        }
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            name.span,
+                            format!("constructor `{}` is not part of `{expected}`", name.text),
+                        ));
+                        for arg in args {
+                            self.bind_pattern(arg, &Type::Unknown, env);
+                        }
+                    }
+                } else {
+                    self.constructor_type(&name.text, args.len(), *span);
+                    for arg in args {
+                        self.bind_pattern(arg, &Type::Unknown, env);
+                    }
                 }
             }
             Pattern::List { items, .. } => {
@@ -317,6 +362,29 @@ impl ModuleChecker<'_> {
             ));
         }
         Some(Type::Unknown)
+    }
+
+    fn expand_alias(&self, ty: &Type) -> Type {
+        match ty {
+            Type::Named { name, args } => self
+                .type_defs
+                .get(name)
+                .map(|def| {
+                    let subst = def
+                        .params
+                        .iter()
+                        .cloned()
+                        .zip(args.iter().cloned())
+                        .collect::<BTreeMap<_, _>>();
+                    substitute(&def.body, &subst)
+                })
+                .unwrap_or_else(|| ty.clone()),
+            _ => ty.clone(),
+        }
+    }
+
+    fn compatible(&self, found: &Type, expected: &Type) -> bool {
+        compatible(&self.expand_alias(found), &self.expand_alias(expected))
     }
 
     fn resolve_expr_name(&mut self, name: &str, span: Span, env: &BTreeMap<String, Type>) -> Type {
@@ -395,6 +463,23 @@ fn collect_local_types(
         .collect()
 }
 
+fn collect_type_definitions(graph: &ModuleGraph) -> BTreeMap<String, TypeDef> {
+    let mut defs = BTreeMap::new();
+    for module in graph.modules.values() {
+        for item in &module.parsed.module.items {
+            if let Item::Type(decl) = item {
+                let def = TypeDef {
+                    params: decl.params.iter().map(|param| param.text.clone()).collect(),
+                    body: lower_type(&decl.body),
+                };
+                defs.insert(decl.name.text.clone(), def.clone());
+                defs.insert(format!("{}.{}", module.name, decl.name.text), def);
+            }
+        }
+    }
+    defs
+}
+
 fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
     let mut types = BTreeMap::new();
     for module in graph.modules.values() {
@@ -403,7 +488,10 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                 Item::Type(decl) => {
                     types.insert(
                         format!("{}.{}", module.name, decl.name.text),
-                        Type::Named(decl.name.text.clone()),
+                        Type::Named {
+                            name: decl.name.text.clone(),
+                            args: Vec::new(),
+                        },
                     );
                     if let TypeExpr::Variant { cases, .. } = &decl.body {
                         let result = lower_named_type_app(&decl.name.text, &decl.params);
@@ -469,15 +557,26 @@ fn lower_type(ty: &TypeExpr) -> Type {
             "Bool" => Type::Bool,
             "Int" => Type::Int,
             "Text" => Type::Text,
-            other => Type::Named(other.to_string()),
+            other => Type::Named {
+                name: other.to_string(),
+                args: Vec::new(),
+            },
         },
         TypeExpr::Var(name) => Type::Var(name.text.clone()),
         TypeExpr::App { callee, args, .. } => {
             let callee = lower_type(callee);
-            if matches!(callee, Type::Named(ref name) if name == "List") && args.len() == 1 {
-                Type::List(Box::new(lower_type(&args[0])))
-            } else {
-                Type::Unknown
+            match callee {
+                Type::Named { name, args: _ } if name == "List" && args.len() == 1 => {
+                    Type::List(Box::new(lower_type(&args[0])))
+                }
+                Type::Named {
+                    name,
+                    args: base_args,
+                } if base_args.is_empty() => Type::Named {
+                    name,
+                    args: args.iter().map(lower_type).collect(),
+                },
+                _ => Type::Unknown,
             }
         }
         TypeExpr::Record { fields, .. } => Type::Record(
@@ -502,28 +601,155 @@ fn lower_type(ty: &TypeExpr) -> Type {
 }
 
 fn lower_named_type_app(name: &str, params: &[Name]) -> Type {
-    if params.is_empty() {
-        Type::Named(name.to_string())
-    } else {
-        Type::Named(format!(
-            "{} {}",
-            name,
-            params
-                .iter()
-                .map(|param| param.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
-        ))
+    Type::Named {
+        name: name.to_string(),
+        args: params
+            .iter()
+            .map(|param| Type::Var(param.text.clone()))
+            .collect(),
     }
 }
 
 fn compatible(found: &Type, expected: &Type) -> bool {
-    found == expected
+    if found == expected
         || matches!(found, Type::Unknown)
         || matches!(expected, Type::Unknown)
         || matches!(expected, Type::Var(_))
         || matches!(found, Type::Var(_))
-        || matches!((found, expected), (Type::Named(a), Type::Named(b)) if a == b)
+    {
+        return true;
+    }
+
+    match (found, expected) {
+        (Type::List(a), Type::List(b)) => compatible(a, b),
+        (Type::Named { name: a, args: aa }, Type::Named { name: b, args: ba }) => {
+            a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(a, b)| compatible(a, b))
+        }
+        (Type::Record(a), Type::Record(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(name, ty)| {
+                    b.iter()
+                        .find_map(|(b_name, b_ty)| (b_name == name).then_some(b_ty))
+                        .is_some_and(|b_ty| compatible(ty, b_ty))
+                })
+        }
+        (Type::Variant(a), Type::Variant(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(name, payload)| {
+                    b.iter()
+                        .find_map(|(b_name, b_payload)| (b_name == name).then_some(b_payload))
+                        .is_some_and(|b_payload| {
+                            payload.len() == b_payload.len()
+                                && payload
+                                    .iter()
+                                    .zip(b_payload)
+                                    .all(|(ty, b_ty)| compatible(ty, b_ty))
+                        })
+                })
+        }
+        (Type::Function(a_params, a_result), Type::Function(b_params, b_result)) => {
+            a_params.len() == b_params.len()
+                && a_params.iter().zip(b_params).all(|(a, b)| compatible(a, b))
+                && compatible(a_result, b_result)
+        }
+        _ => false,
+    }
+}
+
+fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) {
+    match pattern {
+        Type::Var(name) => {
+            subst.entry(name.clone()).or_insert_with(|| found.clone());
+        }
+        Type::List(item) => {
+            if let Type::List(found_item) = found {
+                unify_vars(item, found_item, subst);
+            }
+        }
+        Type::Named { name, args } => {
+            if let Type::Named {
+                name: found_name,
+                args: found_args,
+            } = found
+                && name == found_name
+            {
+                for (arg, found_arg) in args.iter().zip(found_args) {
+                    unify_vars(arg, found_arg, subst);
+                }
+            }
+        }
+        Type::Record(fields) => {
+            if let Type::Record(found_fields) = found {
+                for (name, ty) in fields {
+                    if let Some((_, found_ty)) = found_fields
+                        .iter()
+                        .find(|(found_name, _)| found_name == name)
+                    {
+                        unify_vars(ty, found_ty, subst);
+                    }
+                }
+            }
+        }
+        Type::Variant(cases) => {
+            if let Type::Variant(found_cases) = found {
+                for (name, payload) in cases {
+                    if let Some((_, found_payload)) = found_cases
+                        .iter()
+                        .find(|(found_name, _)| found_name == name)
+                    {
+                        for (ty, found_ty) in payload.iter().zip(found_payload) {
+                            unify_vars(ty, found_ty, subst);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Function(params, result) => {
+            if let Type::Function(found_params, found_result) = found {
+                for (param, found_param) in params.iter().zip(found_params) {
+                    unify_vars(param, found_param, subst);
+                }
+                unify_vars(result, found_result, subst);
+            }
+        }
+        Type::Unit | Type::Bool | Type::Int | Type::Text | Type::Unknown => {}
+    }
+}
+
+fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
+    match ty {
+        Type::Var(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::List(item) => Type::List(Box::new(substitute(item, subst))),
+        Type::Named { name, args } => Type::Named {
+            name: name.clone(),
+            args: args.iter().map(|arg| substitute(arg, subst)).collect(),
+        },
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute(ty, subst)))
+                .collect(),
+        ),
+        Type::Variant(cases) => Type::Variant(
+            cases
+                .iter()
+                .map(|(name, payload)| {
+                    (
+                        name.clone(),
+                        payload.iter().map(|ty| substitute(ty, subst)).collect(),
+                    )
+                })
+                .collect(),
+        ),
+        Type::Function(params, result) => Type::Function(
+            params
+                .iter()
+                .map(|param| substitute(param, subst))
+                .collect(),
+            Box::new(substitute(result, subst)),
+        ),
+        Type::Unit | Type::Bool | Type::Int | Type::Text | Type::Unknown => ty.clone(),
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -534,7 +760,14 @@ impl std::fmt::Display for Type {
             Type::Int => write!(f, "Int"),
             Type::Text => write!(f, "Text"),
             Type::List(item) => write!(f, "List {item}"),
-            Type::Named(name) | Type::Var(name) => write!(f, "{name}"),
+            Type::Named { name, args } => {
+                write!(f, "{name}")?;
+                for arg in args {
+                    write!(f, " {arg}")?;
+                }
+                Ok(())
+            }
+            Type::Var(name) => write!(f, "{name}"),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, (name, ty)) in fields.iter().enumerate() {

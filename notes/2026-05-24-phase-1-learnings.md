@@ -87,3 +87,16 @@ evidence that produced them.
   present in the internal module index.
 - Revisit when: Friend modules, test visibility, or package-private visibility
   are considered.
+
+- Decision: Lower Phase 1 type declarations into checker-visible aliases before
+  checking expressions.
+- Context: Record aliases such as `Todo` now expand for field access, and
+  closed variant constructors get function types such as
+  `Ok : a -> TodoResult a`. This lets `examples/phase-1/todo.fx` be checked
+  structurally rather than accepted by `Unknown`.
+- Applies to phase(s): Phase 1.
+- Future implication: The checker should continue to preserve named types for
+  user-facing diagnostics while expanding aliases internally where structural
+  checks are required.
+- Revisit when: Type aliases need recursion checks, privacy-aware exported
+  signatures, or row-polymorphic record/variant aliases in Phase 2.
