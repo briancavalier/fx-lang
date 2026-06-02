@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
     pub module_types: BTreeMap<String, BTreeMap<String, Type>>,
+    pub typed_spans: BTreeMap<String, Vec<TypedSpan>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,26 @@ pub enum Type {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedSpan {
+    pub module: String,
+    pub span: Span,
+    pub kind: TypedSpanKind,
+    pub label: String,
+    pub display_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypedSpanKind {
+    Value,
+    Type,
+    Constructor,
+    Parameter,
+    Local,
+    Pattern,
+    Field,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeDef {
     params: Vec<String>,
@@ -40,6 +61,7 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
     let mut module_types = BTreeMap::new();
+    let mut typed_spans = BTreeMap::new();
     let type_defs = collect_type_definitions(graph);
     let symbol_types = collect_symbol_types(graph);
     let constructor_arities = collect_constructor_arities(graph);
@@ -54,16 +76,24 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
             type_defs: &type_defs,
             constructor_arities: &constructor_arities,
             symbol_tables: &symbol_tables,
+            typed_spans: Vec::new(),
         };
-        let types = checker.check();
+        let checked = checker.check();
         diagnostics.extend(checker.diagnostics);
-        module_types.insert(module.name.clone(), types);
+        module_types.insert(module.name.clone(), checked.types);
+        typed_spans.insert(module.name.clone(), checked.typed_spans);
     }
 
     CheckResult {
         diagnostics,
         module_types,
+        typed_spans,
     }
+}
+
+struct CheckedModule {
+    types: BTreeMap<String, Type>,
+    typed_spans: Vec<TypedSpan>,
 }
 
 struct ModuleChecker<'a> {
@@ -74,28 +104,46 @@ struct ModuleChecker<'a> {
     type_defs: &'a BTreeMap<String, TypeDef>,
     constructor_arities: &'a BTreeMap<String, usize>,
     symbol_tables: &'a SymbolTables,
+    typed_spans: Vec<TypedSpan>,
 }
 
 impl ModuleChecker<'_> {
-    fn check(&mut self) -> BTreeMap<String, Type> {
+    fn check(&mut self) -> CheckedModule {
         let items = self.module.parsed.module.items.clone();
+        self.add_top_level_typed_spans();
         for item in &items {
             if let Item::Value(decl) = item {
                 self.check_value_decl(decl);
             }
         }
-        self.top_level.clone()
+        CheckedModule {
+            types: self.top_level.clone(),
+            typed_spans: self.typed_spans.clone(),
+        }
     }
 
     fn check_value_decl(&mut self, decl: &ValueDecl) {
         let mut env = self.top_level.clone();
         for param in &decl.params {
-            env.insert(param.name.text.clone(), lower_type(&param.annotation));
+            let ty = lower_type(&param.annotation);
+            self.add_typed_span(
+                param.name.span,
+                TypedSpanKind::Parameter,
+                &param.name.text,
+                &ty,
+            );
+            env.insert(param.name.text.clone(), ty);
         }
         for statement in &decl.body.statements {
             match statement {
                 Stmt::Let(binding) => {
                     let ty = self.infer_expr(&binding.value, &env);
+                    self.add_typed_span(
+                        binding.name.span,
+                        TypedSpanKind::Local,
+                        &binding.name.text,
+                        &ty,
+                    );
                     env.insert(binding.name.text.clone(), ty);
                 }
             }
@@ -119,7 +167,11 @@ impl ModuleChecker<'_> {
         }
 
         match expr {
-            Expr::Name(name) => self.resolve_expr_name(&name.text, name.span, env),
+            Expr::Name(name) => {
+                let ty = self.resolve_expr_name(&name.text, name.span, env);
+                self.add_typed_span(name.span, TypedSpanKind::Value, &name.text, &ty);
+                ty
+            }
             Expr::Int { .. } => Type::Int,
             Expr::Text { .. } => Type::Text,
             Expr::Bool { .. } => Type::Bool,
@@ -152,6 +204,9 @@ impl ModuleChecker<'_> {
                     Type::Record(fields) => fields
                         .iter()
                         .find_map(|(name, ty)| (name == &field.text).then_some(ty.clone()))
+                        .inspect(|ty| {
+                            self.add_typed_span(field.span, TypedSpanKind::Field, &field.text, ty);
+                        })
                         .unwrap_or_else(|| {
                             self.diagnostics.push(Diagnostic::new(
                                 field.span,
@@ -290,6 +345,7 @@ impl ModuleChecker<'_> {
     ) {
         match pattern {
             Pattern::Name(name) => {
+                self.add_typed_span(name.span, TypedSpanKind::Pattern, &name.text, expected);
                 env.insert(name.text.clone(), expected.clone());
             }
             Pattern::Constructor { name, args, span } => {
@@ -340,7 +396,9 @@ impl ModuleChecker<'_> {
                     rest: Some(rest), ..
                 } = pattern
                 {
-                    env.insert(rest.text.clone(), Type::List(Box::new(item_ty)));
+                    let rest_ty = Type::List(Box::new(item_ty));
+                    self.add_typed_span(rest.span, TypedSpanKind::Pattern, &rest.text, &rest_ty);
+                    env.insert(rest.text.clone(), rest_ty);
                 }
             }
             Pattern::Record { .. }
@@ -405,6 +463,63 @@ impl ModuleChecker<'_> {
             .get(&symbol.qualified_name)
             .cloned()
             .unwrap_or(Type::Unknown)
+    }
+
+    fn add_top_level_typed_spans(&mut self) {
+        for item in &self.module.parsed.module.items {
+            match item {
+                Item::Import(_) => {}
+                Item::Type(decl) => {
+                    let ty = Type::Named {
+                        name: decl.name.text.clone(),
+                        args: decl
+                            .params
+                            .iter()
+                            .map(|param| Type::Var(param.text.clone()))
+                            .collect(),
+                    };
+                    self.add_typed_span(decl.name.span, TypedSpanKind::Type, &decl.name.text, &ty);
+                    if let TypeExpr::Variant { cases, .. } = &decl.body {
+                        for case in cases {
+                            if let Some(ty) = self
+                                .symbol_types
+                                .get(&format!("{}.{}", self.module.name, case.name.text))
+                            {
+                                self.add_typed_span(
+                                    case.name.span,
+                                    TypedSpanKind::Constructor,
+                                    &case.name.text,
+                                    ty,
+                                );
+                            }
+                        }
+                    }
+                }
+                Item::Value(decl) => {
+                    if let Some(ty) = self
+                        .symbol_types
+                        .get(&format!("{}.{}", self.module.name, decl.name.text))
+                    {
+                        self.add_typed_span(
+                            decl.name.span,
+                            TypedSpanKind::Value,
+                            &decl.name.text,
+                            ty,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_typed_span(&mut self, span: Span, kind: TypedSpanKind, label: &str, ty: &Type) {
+        self.typed_spans.push(TypedSpan {
+            module: self.module.name.clone(),
+            span,
+            kind,
+            label: label.to_string(),
+            display_type: ty.to_string(),
+        });
     }
 }
 

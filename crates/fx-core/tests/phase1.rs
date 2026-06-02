@@ -1,4 +1,6 @@
-use fx_core::{SourceFile, SymbolKind, check_workspace, index_workspace, resolve_workspace};
+use fx_core::{
+    SourceFile, SymbolKind, analyze_workspace, check_workspace, index_workspace, resolve_workspace,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -275,6 +277,171 @@ bad(result: Result) : Int
     );
 }
 
+#[test]
+fn hovers_top_level_function_type() {
+    let source_text = "answer() : Int\n  42\n";
+    let analysis = analyze_single("main.fx", source_text);
+
+    let hover = analysis
+        .hover_at("main", offset_of(source_text, "answer"))
+        .expect("hover");
+
+    assert_eq!(hover.contents, "answer : () -> Int");
+}
+
+#[test]
+fn hovers_parameter_local_pattern_and_field_types() {
+    let source_text = r#"type Todo = {
+  id: Int,
+  title: Text
+}
+
+pick(todo: Todo, todos: List Todo) : Text
+  label =
+    todo.title
+
+  match todos
+    [first, ...rest] ->
+      label
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "todo: Todo") + 1)
+            .expect("parameter hover")
+            .contents,
+        "todo : Todo"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "label ="))
+            .expect("local hover")
+            .contents,
+        "label : Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "todo.title") + "todo.".len())
+            .expect("field hover")
+            .contents,
+        "title : Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "first"))
+            .expect("pattern hover")
+            .contents,
+        "first : Todo"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "rest"))
+            .expect("rest hover")
+            .contents,
+        "rest : List Todo"
+    );
+}
+
+#[test]
+fn definition_finds_local_parameter_and_binding_targets() {
+    let source_text = r#"main(input: Int) : Int
+  doubled =
+    input + input
+
+  doubled
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let input_def = analysis
+        .definition_at("main", offset_of(source_text, "input +"))
+        .expect("input definition");
+    assert_eq!(input_def.span.start, offset_of(source_text, "input:"));
+
+    let doubled_def = analysis
+        .definition_at("main", offset_of(source_text, "doubled\n"))
+        .expect("doubled definition");
+    assert_eq!(doubled_def.span.start, offset_of(source_text, "doubled ="));
+}
+
+#[test]
+fn definition_finds_pattern_binding_targets() {
+    let source_text = r#"type Todo = { id: Int }
+
+main(todos: List Todo) : Int
+  match todos
+    [first, ...rest] ->
+      first.id
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let first_def = analysis
+        .definition_at("main", offset_of(source_text, "first.id"))
+        .expect("first definition");
+    assert_eq!(first_def.span.start, offset_of(source_text, "first,"));
+}
+
+#[test]
+fn definition_finds_imported_and_qualified_symbols() {
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![
+            source("examples/phase-1/lib.fx", "export value() : Int\n  1\n"),
+            source(
+                "examples/phase-1/main.fx",
+                "import lib\n\none() : Int\n  value()\n\ntwo() : Int\n  lib.value()\n",
+            ),
+        ],
+    );
+    let main_source = analysis
+        .graph
+        .modules
+        .get("main")
+        .expect("main")
+        .parsed
+        .source
+        .as_str();
+
+    let imported = analysis
+        .definition_at("main", offset_of(main_source, "value()"))
+        .expect("imported definition");
+    assert_eq!(imported.module, "lib");
+
+    let qualified = analysis
+        .definition_at("main", offset_of(main_source, "lib.value"))
+        .expect("qualified definition");
+    assert_eq!(qualified.module, "lib");
+}
+
+#[test]
+fn definition_ignores_ambiguous_imported_symbols() {
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![
+            source("examples/phase-1/one.fx", "export value() : Int\n  1\n"),
+            source("examples/phase-1/two.fx", "export value() : Int\n  2\n"),
+            source(
+                "examples/phase-1/main.fx",
+                "import one\nimport two\n\nmain() : Int\n  value()\n",
+            ),
+        ],
+    );
+    let main_source = analysis
+        .graph
+        .modules
+        .get("main")
+        .expect("main")
+        .parsed
+        .source
+        .as_str();
+
+    assert!(
+        analysis
+            .definition_at("main", offset_of(main_source, "value()"))
+            .is_none()
+    );
+}
+
 fn todo_graph() -> fx_core::ModuleGraph {
     index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -298,4 +465,15 @@ fn check_single(path: &str, source_text: &str) -> fx_core::CheckResult {
         vec![source(path, source_text)],
     );
     check_workspace(&graph)
+}
+
+fn analyze_single(path: &str, source_text: &str) -> fx_core::Analysis {
+    analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source(&format!("examples/phase-1/{path}"), source_text)],
+    )
+}
+
+fn offset_of(source: &str, pattern: &str) -> usize {
+    source.find(pattern).expect("pattern exists")
 }

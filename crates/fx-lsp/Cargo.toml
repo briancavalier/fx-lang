@@ -13,3 +13,4 @@ fx-core.workspace = true
 fx-syntax.workspace = true
 tokio.workspace = true
 tower-lsp.workspace = true
+walkdir.workspace = true

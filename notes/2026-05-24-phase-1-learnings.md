@@ -100,3 +100,16 @@ evidence that produced them.
   checks are required.
 - Revisit when: Type aliases need recursion checks, privacy-aware exported
   signatures, or row-polymorphic record/variant aliases in Phase 2.
+
+- Decision: Feed LSP hover and go-to-definition through a shared `fx-core`
+  analysis API instead of rebuilding semantic lookup in `fx-lsp`.
+- Context: `fx-core::analysis` now combines module indexing, resolver
+  references, checker diagnostics, and typed spans. `fx-lsp` stores open
+  documents, builds a workspace analysis with open-document overlays, and adapts
+  byte spans to LSP UTF-16 positions.
+- Applies to phase(s): Phase 1.
+- Future implication: LSP features such as document symbols, workspace symbols,
+  completion, and richer hover should add facts to core analysis first, then
+  adapt them in the protocol layer.
+- Revisit when: Diagnostics need per-file ownership instead of the current flat
+  checker diagnostic list.

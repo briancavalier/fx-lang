@@ -192,6 +192,7 @@ dependencies = [
  "fx-syntax",
  "tokio",
  "tower-lsp",
+ "walkdir",
 ]
 
 [[package]]
