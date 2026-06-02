@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
+    pub module_diagnostics: BTreeMap<String, Vec<Diagnostic>>,
     pub module_types: BTreeMap<String, BTreeMap<String, Type>>,
     pub typed_spans: BTreeMap<String, Vec<TypedSpan>>,
 }
@@ -60,6 +61,7 @@ struct TypeDef {
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
+    let mut module_diagnostics = BTreeMap::new();
     let mut module_types = BTreeMap::new();
     let mut typed_spans = BTreeMap::new();
     let type_defs = collect_type_definitions(graph);
@@ -79,13 +81,16 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
             typed_spans: Vec::new(),
         };
         let checked = checker.check();
-        diagnostics.extend(checker.diagnostics);
+        let checked_diagnostics = checker.diagnostics;
+        diagnostics.extend(checked_diagnostics.clone());
+        module_diagnostics.insert(module.name.clone(), checked_diagnostics);
         module_types.insert(module.name.clone(), checked.types);
         typed_spans.insert(module.name.clone(), checked.typed_spans);
     }
 
     CheckResult {
         diagnostics,
+        module_diagnostics,
         module_types,
         typed_spans,
     }

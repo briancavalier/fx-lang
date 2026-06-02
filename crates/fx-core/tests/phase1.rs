@@ -442,6 +442,79 @@ fn definition_ignores_ambiguous_imported_symbols() {
     );
 }
 
+#[test]
+fn analysis_owns_parse_diagnostics_by_path() {
+    let lib_path = PathBuf::from("examples/phase-1/lib.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source("examples/phase-1/lib.fx", "bad() : Int\n  if\n")],
+    );
+
+    let diagnostics = analysis.diagnostics_by_path();
+    assert!(diagnostics.get(&lib_path).is_some_and(|diagnostics| {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.module == "lib")
+    }));
+}
+
+#[test]
+fn analysis_owns_unresolved_imports_by_importing_path() {
+    let main_path = PathBuf::from("examples/phase-1/main.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source("examples/phase-1/main.fx", "import missing\n")],
+    );
+
+    assert_path_has_diagnostic(&analysis, &main_path, "unresolved import");
+}
+
+#[test]
+fn analysis_owns_duplicate_definitions_by_defining_path() {
+    let lib_path = PathBuf::from("examples/phase-1/lib.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source(
+            "examples/phase-1/lib.fx",
+            "one() : Int\n  1\n\none() : Int\n  2\n",
+        )],
+    );
+
+    assert_path_has_diagnostic(&analysis, &lib_path, "duplicate definition");
+}
+
+#[test]
+fn analysis_owns_resolver_ambiguity_by_reference_path() {
+    let main_path = PathBuf::from("examples/phase-1/main.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![
+            source("examples/phase-1/one.fx", "export value() : Int\n  1\n"),
+            source("examples/phase-1/two.fx", "export value() : Int\n  2\n"),
+            source(
+                "examples/phase-1/main.fx",
+                "import one\nimport two\n\nmain() : Int\n  value()\n",
+            ),
+        ],
+    );
+
+    assert_path_has_diagnostic(&analysis, &main_path, "ambiguous name `value`");
+}
+
+#[test]
+fn analysis_owns_checker_type_errors_by_checked_path() {
+    let lib_path = PathBuf::from("examples/phase-1/lib.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source(
+            "examples/phase-1/lib.fx",
+            "bad() : Int\n  \"nope\"\n",
+        )],
+    );
+
+    assert_path_has_diagnostic(&analysis, &lib_path, "expected `Int`, found `Text`");
+}
+
 fn todo_graph() -> fx_core::ModuleGraph {
     index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -476,4 +549,14 @@ fn analyze_single(path: &str, source_text: &str) -> fx_core::Analysis {
 
 fn offset_of(source: &str, pattern: &str) -> usize {
     source.find(pattern).expect("pattern exists")
+}
+
+fn assert_path_has_diagnostic(analysis: &fx_core::Analysis, path: &PathBuf, message: &str) {
+    let diagnostics = analysis.diagnostics_by_path();
+    assert!(
+        diagnostics.get(path).is_some_and(|diagnostics| diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains(message))),
+        "expected diagnostic containing `{message}` for {path:?}, got {diagnostics:?}"
+    );
 }

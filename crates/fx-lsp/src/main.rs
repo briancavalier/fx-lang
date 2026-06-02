@@ -1,4 +1,4 @@
-use fx_core::{Analysis, SourceFile, analyze_workspace};
+use fx_core::{Analysis, AnalysisDiagnostic, SourceFile, analyze_workspace};
 use fx_syntax::span::Span;
 use std::collections::BTreeMap;
 use std::fs;
@@ -7,10 +7,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, Location, MarkedString, OneOf, Position, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeParams, InitializeResult, Location, MarkedString, OneOf, Position,
+    Range, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -32,6 +32,13 @@ struct Document {
     path: PathBuf,
     text: String,
     line_index: LineIndex,
+}
+
+#[derive(Debug)]
+struct AnalysisSnapshot {
+    analysis: Analysis,
+    document: Document,
+    open_documents: Vec<Document>,
 }
 
 #[tower_lsp::async_trait]
@@ -89,22 +96,22 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        let Some((analysis, document)) = self.analysis_for_uri(&uri).await else {
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
             return Ok(None);
         };
-        let Some(module) = analysis.module_for_path(&document.path) else {
+        let Some(module) = snapshot.analysis.module_for_path(&snapshot.document.path) else {
             return Ok(None);
         };
-        let Some(offset) = document.line_index.position_to_offset(position) else {
+        let Some(offset) = snapshot.document.line_index.position_to_offset(position) else {
             return Ok(None);
         };
-        let Some(hover) = analysis.hover_at(module, offset) else {
+        let Some(hover) = snapshot.analysis.hover_at(module, offset) else {
             return Ok(None);
         };
 
         Ok(Some(Hover {
             contents: HoverContents::Scalar(MarkedString::String(hover.contents)),
-            range: Some(document.line_index.span_to_range(hover.span)),
+            range: Some(snapshot.document.line_index.span_to_range(hover.span)),
         }))
     }
 
@@ -114,19 +121,19 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        let Some((analysis, document)) = self.analysis_for_uri(&uri).await else {
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
             return Ok(None);
         };
-        let Some(module) = analysis.module_for_path(&document.path) else {
+        let Some(module) = snapshot.analysis.module_for_path(&snapshot.document.path) else {
             return Ok(None);
         };
-        let Some(offset) = document.line_index.position_to_offset(position) else {
+        let Some(offset) = snapshot.document.line_index.position_to_offset(position) else {
             return Ok(None);
         };
-        let Some(definition) = analysis.definition_at(module, offset) else {
+        let Some(definition) = snapshot.analysis.definition_at(module, offset) else {
             return Ok(None);
         };
-        let Some(target_module) = analysis.graph.modules.get(&definition.module) else {
+        let Some(target_module) = snapshot.analysis.graph.modules.get(&definition.module) else {
             return Ok(None);
         };
         let Ok(target_uri) = Url::from_file_path(&definition.path) else {
@@ -143,26 +150,25 @@ impl LanguageServer for Backend {
 
 impl Backend {
     async fn publish(&self, uri: Url) {
-        let Some((analysis, document)) = self.analysis_for_uri(&uri).await else {
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
             return;
         };
-        let diagnostics = analysis
-            .check
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| Diagnostic {
-                range: document.line_index.span_to_range(diagnostic.span),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: diagnostic.message,
-                ..Diagnostic::default()
-            })
-            .collect();
-        self.client
-            .publish_diagnostics(document.uri, diagnostics, None)
-            .await;
+        let diagnostics_by_path = snapshot.analysis.diagnostics_by_path();
+        for document in snapshot.open_documents {
+            if !is_fx_path(&document.path) {
+                continue;
+            }
+            let diagnostics = diagnostics_by_path
+                .get(&document.path)
+                .map(|diagnostics| lsp_diagnostics_for_document(&document, diagnostics))
+                .unwrap_or_default();
+            self.client
+                .publish_diagnostics(document.uri, diagnostics, None)
+                .await;
+        }
     }
 
-    async fn analysis_for_uri(&self, uri: &Url) -> Option<(Analysis, Document)> {
+    async fn analysis_for_uri(&self, uri: &Url) -> Option<AnalysisSnapshot> {
         let state = self.state.lock().await;
         let document = state.documents.get(uri)?.clone();
         let root = state
@@ -173,7 +179,7 @@ impl Backend {
         drop(state);
 
         let mut files = collect_workspace_files(&root);
-        for document in open_documents {
+        for document in &open_documents {
             if let Some(existing) = files.iter_mut().find(|file| file.path == document.path) {
                 existing.source = document.text.clone();
             } else {
@@ -184,8 +190,31 @@ impl Backend {
             }
         }
 
-        Some((analyze_workspace(&root, files), document))
+        Some(AnalysisSnapshot {
+            analysis: analyze_workspace(&root, files),
+            document,
+            open_documents,
+        })
     }
+}
+
+fn lsp_diagnostics_for_document(
+    document: &Document,
+    diagnostics: &[AnalysisDiagnostic],
+) -> Vec<LspDiagnostic> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| LspDiagnostic {
+            range: document.line_index.span_to_range(diagnostic.span),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: diagnostic.message.clone(),
+            ..LspDiagnostic::default()
+        })
+        .collect()
+}
+
+fn is_fx_path(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "fx")
 }
 
 impl Document {
@@ -294,9 +323,12 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::LineIndex;
+    use super::{Document, LineIndex, lsp_diagnostics_for_document};
+    use fx_core::AnalysisDiagnostic;
     use fx_syntax::span::Span;
+    use std::path::PathBuf;
     use tower_lsp::lsp_types::Position;
+    use tower_lsp::lsp_types::Url;
 
     #[test]
     fn line_index_converts_multiline_offsets() {
@@ -343,5 +375,48 @@ mod tests {
             }),
             Some("a😀".len())
         );
+    }
+
+    #[test]
+    fn diagnostic_conversion_uses_each_document_line_index() {
+        let first = document("/private/tmp/one.fx", "bad\n");
+        let second = document("/private/tmp/two.fx", "\n\nbad\n");
+        let span = Span::new(0, 3);
+
+        let first_diagnostics = lsp_diagnostics_for_document(&first, &[analysis_diagnostic(span)]);
+        let second_diagnostics =
+            lsp_diagnostics_for_document(&second, &[analysis_diagnostic(Span::new(2, 5))]);
+
+        assert_eq!(
+            first_diagnostics[0].range.start,
+            Position {
+                line: 0,
+                character: 0
+            }
+        );
+        assert_eq!(
+            second_diagnostics[0].range.start,
+            Position {
+                line: 2,
+                character: 0
+            }
+        );
+    }
+
+    fn document(path: &str, text: &str) -> Document {
+        Document::new(
+            Url::from_file_path(path).expect("file url"),
+            PathBuf::from(path),
+            text.to_string(),
+        )
+    }
+
+    fn analysis_diagnostic(span: Span) -> AnalysisDiagnostic {
+        AnalysisDiagnostic {
+            module: "main".to_string(),
+            path: PathBuf::from("/private/tmp/main.fx"),
+            span,
+            message: "problem".to_string(),
+        }
     }
 }

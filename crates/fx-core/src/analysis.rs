@@ -2,6 +2,7 @@ use crate::check::{CheckResult, TypedSpan};
 use crate::module::{ModuleGraph, SourceFile};
 use crate::{check_workspace, index_workspace, resolve_workspace};
 use fx_syntax::ast::*;
+use fx_syntax::diagnostic::Diagnostic;
 use fx_syntax::span::Span;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +29,14 @@ pub struct DefinitionInfo {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisDiagnostic {
+    pub module: String,
+    pub path: PathBuf,
+    pub span: Span,
+    pub message: String,
+}
+
 pub fn analyze_workspace(root: &Path, files: Vec<SourceFile>) -> Analysis {
     let graph = index_workspace(root, files);
     let resolved = resolve_workspace(&graph);
@@ -46,6 +55,30 @@ impl Analysis {
             .values()
             .find(|module| module.path == path)
             .map(|module| module.name.as_str())
+    }
+
+    pub fn diagnostics_by_path(&self) -> BTreeMap<PathBuf, Vec<AnalysisDiagnostic>> {
+        let mut by_path = BTreeMap::<PathBuf, Vec<AnalysisDiagnostic>>::new();
+        for module in self.graph.modules.values() {
+            add_diagnostics(
+                &mut by_path,
+                &module.name,
+                &module.path,
+                &module.diagnostics,
+            );
+            if let Some(resolved) = self.resolved.modules.get(&module.name) {
+                add_diagnostics(
+                    &mut by_path,
+                    &module.name,
+                    &module.path,
+                    &resolved.diagnostics,
+                );
+            }
+            if let Some(check_diagnostics) = self.check.module_diagnostics.get(&module.name) {
+                add_diagnostics(&mut by_path, &module.name, &module.path, check_diagnostics);
+            }
+        }
+        by_path
     }
 
     pub fn hover_at(&self, module: &str, byte_offset: usize) -> Option<HoverInfo> {
@@ -121,6 +154,23 @@ impl Analysis {
         }
         None
     }
+}
+
+fn add_diagnostics(
+    by_path: &mut BTreeMap<PathBuf, Vec<AnalysisDiagnostic>>,
+    module: &str,
+    path: &Path,
+    diagnostics: &[Diagnostic],
+) {
+    by_path
+        .entry(path.to_path_buf())
+        .or_default()
+        .extend(diagnostics.iter().map(|diagnostic| AnalysisDiagnostic {
+            module: module.to_string(),
+            path: path.to_path_buf(),
+            span: diagnostic.span,
+            message: diagnostic.message.clone(),
+        }));
 }
 
 fn local_definition_in_block(

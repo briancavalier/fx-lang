@@ -25,6 +25,7 @@ pub struct IndexedModule {
     pub parsed: ParsedModule,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,21 +46,20 @@ pub enum SymbolKind {
 }
 
 pub fn index_workspace(root: &Path, files: Vec<SourceFile>) -> ModuleGraph {
-    let mut diagnostics = Vec::new();
     let mut modules = BTreeMap::new();
 
     for file in files {
         let parsed = parse_file(file.source);
-        diagnostics.extend(parsed.diagnostics.clone());
+        let mut module_diagnostics = parsed.diagnostics.clone();
         let name = module_name(root, &file.path);
         if modules.contains_key(&name) {
-            diagnostics.push(Diagnostic::new(
+            module_diagnostics.push(Diagnostic::new(
                 Span::point(0),
                 format!("duplicate module `{name}`"),
             ));
         }
         let (symbols, imports, index_diagnostics) = index_module(&name, &parsed.module);
-        diagnostics.extend(index_diagnostics);
+        module_diagnostics.extend(index_diagnostics);
         modules.insert(
             name.clone(),
             IndexedModule {
@@ -68,21 +68,27 @@ pub fn index_workspace(root: &Path, files: Vec<SourceFile>) -> ModuleGraph {
                 parsed,
                 symbols,
                 imports,
+                diagnostics: module_diagnostics,
             },
         );
     }
 
     let module_names = modules.keys().cloned().collect::<BTreeSet<_>>();
-    for module in modules.values() {
-        for import in &module.imports {
-            if !module_names.contains(import) {
-                diagnostics.push(Diagnostic::new(
+    for module in modules.values_mut() {
+        for import in module.imports.clone() {
+            if !module_names.contains(&import) {
+                module.diagnostics.push(Diagnostic::new(
                     Span::point(0),
                     format!("unresolved import `{import}` in module `{}`", module.name),
                 ));
             }
         }
     }
+
+    let diagnostics = modules
+        .values()
+        .flat_map(|module| module.diagnostics.iter().cloned())
+        .collect();
 
     ModuleGraph {
         modules,

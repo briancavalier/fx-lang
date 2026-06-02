@@ -15,6 +15,7 @@ pub struct ResolvedWorkspace {
 pub struct ResolvedModule {
     pub name: String,
     pub references: Vec<ResolvedReference>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,12 +38,14 @@ pub fn resolve_workspace(graph: &ModuleGraph) -> ResolvedWorkspace {
             references: Vec::new(),
         };
         resolver.resolve_module();
-        diagnostics.extend(resolver.diagnostics);
+        let module_diagnostics = resolver.diagnostics;
+        diagnostics.extend(module_diagnostics.clone());
         modules.insert(
             module.name.clone(),
             ResolvedModule {
                 name: module.name.clone(),
                 references: resolver.references,
+                diagnostics: module_diagnostics,
             },
         );
     }

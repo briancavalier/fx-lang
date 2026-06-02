@@ -113,3 +113,17 @@ evidence that produced them.
   adapt them in the protocol layer.
 - Revisit when: Diagnostics need per-file ownership instead of the current flat
   checker diagnostic list.
+
+- Decision: Own diagnostics by module/file in each compiler phase, and derive
+  aggregate diagnostic lists from those owned diagnostics.
+- Context: `IndexedModule`, `ResolvedModule`, and `CheckResult` now retain
+  module-owned diagnostics. `fx-core::analysis` exposes `diagnostics_by_path()`
+  for LSP publication, while the older aggregate diagnostic vectors remain for
+  CLI/backcompat behavior.
+- Applies to phase(s): Phase 1.
+- Future implication: New compiler phases should attach diagnostics to the
+  source module/file where the problem appears before flattening. This keeps
+  LSP publication precise and avoids converting unrelated file spans with the
+  active document's line index.
+- Revisit when: Package roots, generated modules, or cross-file diagnostics need
+  richer ownership than a single source path.
