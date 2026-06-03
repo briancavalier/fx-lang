@@ -213,7 +213,11 @@ impl Parser {
     }
 
     fn expr(&mut self) -> Expr {
-        self.binary_expr(0)
+        if self.starts_lambda_expr() {
+            self.lambda_expr()
+        } else {
+            self.binary_expr(0)
+        }
     }
 
     fn binary_expr(&mut self, min_prec: u8) -> Expr {
@@ -326,6 +330,82 @@ impl Parser {
             then_branch: Box::new(then_branch),
             else_branch: Box::new(else_branch),
             span,
+        }
+    }
+
+    fn lambda_expr(&mut self) -> Expr {
+        let start = self.peek().span.start;
+        let params = if self.at(TokenKind::LParen) {
+            self.lambda_param_list()
+        } else {
+            vec![self.lambda_param()]
+        };
+        self.expect(TokenKind::Arrow, "expected `->` in lambda");
+        let body = self.lambda_body();
+        let span = Span::new(start, body.span.end);
+        Expr::Lambda { params, body, span }
+    }
+
+    fn lambda_param_list(&mut self) -> Vec<LambdaParam> {
+        self.expect(TokenKind::LParen, "expected `(` before lambda parameters");
+        let mut params = Vec::new();
+        if !self.at(TokenKind::RParen) {
+            loop {
+                params.push(self.lambda_param());
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "expected `)` after lambda parameters");
+        params
+    }
+
+    fn lambda_param(&mut self) -> LambdaParam {
+        match self.peek().kind.clone() {
+            TokenKind::Ident(_) => {
+                let span = self.peek().span;
+                let name = self.expect_ident("expected lambda parameter");
+                LambdaParam {
+                    name: name.filter(|name| name.text != "_"),
+                    span,
+                }
+            }
+            TokenKind::Spread => {
+                let span = self.bump().span;
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "lambda rest or pattern parameters are not supported in Phase 1",
+                ));
+                if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                    self.bump();
+                }
+                LambdaParam { name: None, span }
+            }
+            _ => {
+                let span = self.bump().span;
+                self.diagnostics
+                    .push(Diagnostic::new(span, "expected lambda parameter"));
+                LambdaParam { name: None, span }
+            }
+        }
+    }
+
+    fn lambda_body(&mut self) -> Block {
+        if self.at(TokenKind::Newline) {
+            self.expect_newline("expected newline after lambda arrow");
+            self.expect(TokenKind::Indent, "expected indented lambda body");
+            let body = self.block();
+            self.expect(TokenKind::Dedent, "expected end of lambda body");
+            body
+        } else {
+            let expr = self.expr();
+            let span = expr.span();
+            Block {
+                statements: Vec::new(),
+                result: Box::new(expr),
+                span,
+            }
         }
     }
 
@@ -578,6 +658,29 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> TypeExpr {
+        self.function_type()
+    }
+
+    fn function_type(&mut self) -> TypeExpr {
+        let left = self.type_app();
+        if self.eat(TokenKind::Arrow).is_none() {
+            return left;
+        }
+        let result = self.function_type();
+        let start = left.span().start;
+        let params = match left {
+            TypeExpr::Tuple { elems, .. } => elems,
+            other => vec![other],
+        };
+        let span = Span::new(start, result.span().end);
+        TypeExpr::Function {
+            params,
+            result: Box::new(result),
+            span,
+        }
+    }
+
+    fn type_app(&mut self) -> TypeExpr {
         let mut callee = self.type_primary();
         let mut args = Vec::new();
         while self.starts_type_primary() {
@@ -744,6 +847,38 @@ impl Parser {
                 .tokens
                 .get(self.pos + 1)
                 .is_some_and(|token| matches!(token.kind, TokenKind::Equal))
+    }
+
+    fn starts_lambda_expr(&self) -> bool {
+        match self.peek().kind {
+            TokenKind::Ident(_) => self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Arrow)),
+            TokenKind::LParen => self.lambda_param_list_is_followed_by_arrow(),
+            _ => false,
+        }
+    }
+
+    fn lambda_param_list_is_followed_by_arrow(&self) -> bool {
+        let mut depth = 0usize;
+        for (offset, token) in self.tokens.iter().enumerate().skip(self.pos) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(offset + 1)
+                            .is_some_and(|next| matches!(next.kind, TokenKind::Arrow));
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     fn starts_type_primary(&self) -> bool {

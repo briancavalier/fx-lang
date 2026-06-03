@@ -153,3 +153,15 @@ evidence that produced them.
   update syntax remains invalid.
 - Revisit when: Open row updates or field addition through row variables are
   implemented.
+
+- Decision: Type Phase 1 lambdas contextually from expected function types.
+- Context: Lambda syntax now supports `x -> expr`, `(x, y) -> expr`, and
+  block bodies after `->`. Parameters are unannotated and receive types from
+  an expected `a -> b` or `(a, b) -> c` type. Lambdas without an expected
+  function type produce a diagnostic instead of triggering general inference.
+- Applies to phase(s): Phase 1.
+- Future implication: The checker can remain annotation-driven while still
+  supporting higher-order examples. General inference or annotated lambda
+  parameters can be added later without changing the basic arrow syntax.
+- Revisit when: Pattern lambda parameters, inferred lambda parameter types, or
+  richer block parsing around closing delimiters are implemented.

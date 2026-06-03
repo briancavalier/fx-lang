@@ -219,6 +219,15 @@ impl ModuleResolver<'_> {
                     self.resolve_expr(&field.value, locals);
                 }
             }
+            Expr::Lambda { params, body, .. } => {
+                let mut lambda_locals = locals.clone();
+                for param in params {
+                    if let Some(name) = &param.name {
+                        lambda_locals.insert(name.text.clone());
+                    }
+                }
+                self.resolve_block(body, &mut lambda_locals);
+            }
             Expr::Field { target, .. } => self.resolve_expr(target, locals),
             Expr::Call { callee, args, .. } => {
                 self.resolve_expr(callee, locals);
@@ -309,6 +318,12 @@ impl ModuleResolver<'_> {
                 for arg in args {
                     self.resolve_type_expr(arg, type_params);
                 }
+            }
+            TypeExpr::Function { params, result, .. } => {
+                for param in params {
+                    self.resolve_type_expr(param, type_params);
+                }
+                self.resolve_type_expr(result, type_params);
             }
             TypeExpr::Record { fields, .. } => {
                 for field in fields {
@@ -404,6 +419,12 @@ fn collect_type_vars(ty: &TypeExpr, vars: &mut BTreeSet<String>) {
             for elem in elems {
                 collect_type_vars(elem, vars);
             }
+        }
+        TypeExpr::Function { params, result, .. } => {
+            for param in params {
+                collect_type_vars(param, vars);
+            }
+            collect_type_vars(result, vars);
         }
         TypeExpr::Named { .. } | TypeExpr::Error { .. } => {}
     }

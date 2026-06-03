@@ -231,6 +231,23 @@ fn local_definition_in_expr(
                 })
             })
         }
+        Expr::Lambda { params, body, .. } => {
+            let mut lambda_locals = locals.clone();
+            for param in params {
+                if let Some(name) = &param.name {
+                    let definition = DefinitionInfo {
+                        module: module.name.clone(),
+                        path: module.path.clone(),
+                        span: name.span,
+                    };
+                    if contains_offset(name.span, byte_offset) {
+                        return Some(definition);
+                    }
+                    lambda_locals.insert(name.text.clone(), definition);
+                }
+            }
+            local_definition_in_block(body, byte_offset, &mut lambda_locals, module)
+        }
         Expr::Field { target, .. } => local_definition_in_expr(target, byte_offset, locals, module),
         Expr::Call { callee, args, .. } => {
             local_definition_in_expr(callee, byte_offset, locals, module).or_else(|| {

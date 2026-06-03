@@ -139,7 +139,18 @@ impl ModuleChecker<'_> {
             );
             env.insert(param.name.text.clone(), ty);
         }
-        for statement in &decl.body.statements {
+        let expected = lower_type(&decl.annotation);
+        self.check_block(&decl.body, &env, &expected);
+    }
+
+    fn check_block(
+        &mut self,
+        block: &Block,
+        env: &BTreeMap<String, Type>,
+        expected: &Type,
+    ) -> Type {
+        let mut env = env.clone();
+        for statement in &block.statements {
             match statement {
                 Stmt::Let(binding) => {
                     let ty = self.infer_expr(&binding.value, &env);
@@ -153,14 +164,101 @@ impl ModuleChecker<'_> {
                 }
             }
         }
-        let found = self.infer_expr(&decl.body.result, &env);
-        let expected = lower_type(&decl.annotation);
-        if !self.compatible(&found, &expected) {
+        self.check_expr(&block.result, &env, expected)
+    }
+
+    fn check_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>, expected: &Type) -> Type {
+        match expr {
+            Expr::Lambda { .. } => self.check_lambda(expr, env, expected),
+            Expr::List { items, .. } => {
+                if let Type::List(item_expected) = self.expand_alias(expected) {
+                    for item in items {
+                        self.check_expr(item, env, &item_expected);
+                    }
+                    expected.clone()
+                } else {
+                    self.check_inferred_expr(expr, env, expected)
+                }
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.check_expr(condition, env, &Type::Bool);
+                self.check_expr(then_branch, env, expected);
+                self.check_expr(else_branch, env, expected);
+                expected.clone()
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                let scrutinee_ty = self.infer_expr(scrutinee, env);
+                for arm in arms {
+                    let mut arm_env = env.clone();
+                    self.bind_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env);
+                    self.check_expr(&arm.value, &arm_env, expected);
+                }
+                expected.clone()
+            }
+            _ => self.check_inferred_expr(expr, env, expected),
+        }
+    }
+
+    fn check_inferred_expr(
+        &mut self,
+        expr: &Expr,
+        env: &BTreeMap<String, Type>,
+        expected: &Type,
+    ) -> Type {
+        let found = self.infer_expr(expr, env);
+        if !self.compatible(&found, expected) {
             self.diagnostics.push(Diagnostic::new(
-                decl.body.result.span(),
+                expr.span(),
                 format!("expected `{expected}`, found `{found}`"),
             ));
         }
+        found
+    }
+
+    fn check_lambda(&mut self, expr: &Expr, env: &BTreeMap<String, Type>, expected: &Type) -> Type {
+        let Expr::Lambda { params, body, .. } = expr else {
+            return Type::Unknown;
+        };
+        let expanded = self.expand_alias(expected);
+        let Type::Function(expected_params, expected_result) = expanded else {
+            if !matches!(expanded, Type::Unknown) {
+                self.diagnostics.push(Diagnostic::new(
+                    expr.span(),
+                    "lambda requires an expected function type",
+                ));
+            }
+            return Type::Unknown;
+        };
+
+        if params.len() != expected_params.len() {
+            self.diagnostics.push(Diagnostic::new(
+                expr.span(),
+                format!(
+                    "arity mismatch: expected {} lambda parameters, found {}",
+                    expected_params.len(),
+                    params.len()
+                ),
+            ));
+        }
+
+        let mut lambda_env = env.clone();
+        for (index, param) in params.iter().enumerate() {
+            let param_ty = expected_params.get(index).cloned().unwrap_or(Type::Unknown);
+            if let Some(name) = &param.name {
+                self.add_typed_span(name.span, TypedSpanKind::Parameter, &name.text, &param_ty);
+                lambda_env.insert(name.text.clone(), param_ty);
+            }
+        }
+
+        self.check_block(body, &lambda_env, &expected_result);
+        expected.clone()
     }
 
     fn infer_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>) -> Type {
@@ -204,6 +302,13 @@ impl ModuleChecker<'_> {
                     .collect(),
             ),
             Expr::RecordUpdate { base, fields, .. } => self.infer_record_update(base, fields, env),
+            Expr::Lambda { .. } => {
+                self.diagnostics.push(Diagnostic::new(
+                    expr.span(),
+                    "lambda requires an expected function type",
+                ));
+                Type::Unknown
+            }
             Expr::Field { target, field, .. } => {
                 let target_ty = self.infer_expr(target, env);
                 match self.expand_alias(&target_ty) {
@@ -244,14 +349,8 @@ impl ModuleChecker<'_> {
                     }
                     let mut subst = BTreeMap::new();
                     for (arg, expected) in args.iter().zip(params.iter()) {
-                        let found = self.infer_expr(arg, env);
+                        let found = self.check_expr(arg, env, expected);
                         unify_vars(expected, &found, &mut subst);
-                        if !self.compatible(&found, expected) {
-                            self.diagnostics.push(Diagnostic::new(
-                                arg.span(),
-                                format!("expected `{expected}`, found `{found}`"),
-                            ));
-                        }
                     }
                     substitute(&result, &subst)
                 }
@@ -365,24 +464,18 @@ impl ModuleChecker<'_> {
         };
 
         for update in updates {
-            let value_ty = self.infer_expr(&update.value, env);
             if let Some(index) = fields
                 .iter()
                 .position(|(name, _)| name == &update.name.text)
             {
                 let expected = fields[index].1.clone();
+                let value_ty = self.check_expr(&update.value, env, &expected);
                 self.add_typed_span(
                     update.name.span,
                     TypedSpanKind::Field,
                     &update.name.text,
                     &expected,
                 );
-                if !self.compatible(&value_ty, &expected) {
-                    self.diagnostics.push(Diagnostic::new(
-                        update.value.span(),
-                        format!("expected `{expected}`, found `{value_ty}`"),
-                    ));
-                }
                 fields[index].1 = value_ty;
             } else {
                 self.diagnostics.push(Diagnostic::new(
@@ -756,6 +849,10 @@ fn lower_type(ty: &TypeExpr) -> Type {
                 _ => Type::Unknown,
             }
         }
+        TypeExpr::Function { params, result, .. } => Type::Function(
+            params.iter().map(lower_type).collect(),
+            Box::new(lower_type(result)),
+        ),
         TypeExpr::Record { fields, .. } => Type::Record(
             fields
                 .iter()

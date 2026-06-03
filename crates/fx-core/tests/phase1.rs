@@ -52,6 +52,20 @@ fn checker_runs_on_phase_1_record_update_fixture() {
 }
 
 #[test]
+fn checker_runs_on_phase_1_lambda_fixture() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-1/lambda.fx"),
+            source: include_str!("../../../examples/phase-1/lambda.fx").to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
 fn reports_duplicate_definitions() {
     let graph = index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -300,6 +314,95 @@ fn reports_record_update_non_record_bases() {
 }
 
 #[test]
+fn checks_lambda_arguments_against_expected_function_types() {
+    let result = check_single(
+        "lambda.fx",
+        r#"apply(f: Int -> Int, value: Int) : Int
+  f(value)
+
+main() : Int
+  apply(x -> x + 1, 1)
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_calls_through_lambda_valued_locals() {
+    let result = check_single(
+        "lambda.fx",
+        r#"make-increment() : Int -> Int
+  x -> x + 1
+
+main() : Int
+  increment =
+    make-increment()
+
+  increment(1)
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_lambdas_without_expected_function_types() {
+    let result = check_single(
+        "lambda.fx",
+        r#"bad() : Int
+  x -> x
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("lambda requires an expected function type")
+    }));
+}
+
+#[test]
+fn reports_lambda_arity_mismatches() {
+    let result = check_single(
+        "lambda.fx",
+        r#"apply(f: (Int, Int) -> Int) : Int
+  f(1, 2)
+
+bad() : Int
+  apply(x -> x)
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("arity mismatch"))
+    );
+}
+
+#[test]
+fn reports_lambda_body_result_mismatches() {
+    let result = check_single(
+        "lambda.fx",
+        r#"apply(f: Int -> Int, value: Int) : Int
+  f(value)
+
+bad() : Int
+  apply(x -> "nope", 1)
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
+    );
+}
+
+#[test]
 fn reports_constructor_arity_mismatches() {
     let result = check_single(
         "variant.fx",
@@ -377,7 +480,7 @@ bad(result: Result) : Int
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("match arm type mismatch"))
+            .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
     );
 }
 
@@ -468,6 +571,25 @@ mark-done(todo: Todo) : Todo
 }
 
 #[test]
+fn hovers_lambda_parameters() {
+    let source_text = r#"apply(f: Int -> Int, value: Int) : Int
+  f(value)
+
+main() : Int
+  apply(x -> x + 1, 1)
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "x ->"))
+            .expect("lambda param hover")
+            .contents,
+        "x : Int"
+    );
+}
+
+#[test]
 fn definition_finds_local_parameter_and_binding_targets() {
     let source_text = r#"main(input: Int) : Int
   doubled =
@@ -502,6 +624,23 @@ mark-done(todo: Todo) : Todo
         .expect("todo definition");
 
     assert_eq!(todo_def.span.start, offset_of(source_text, "todo: Todo"));
+}
+
+#[test]
+fn definition_finds_lambda_parameter_targets() {
+    let source_text = r#"apply(f: Int -> Int, value: Int) : Int
+  f(value)
+
+main() : Int
+  apply(x -> x + 1, 1)
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let x_def = analysis
+        .definition_at("main", offset_of(source_text, "x +"))
+        .expect("x definition");
+
+    assert_eq!(x_def.span.start, offset_of(source_text, "x ->"));
 }
 
 #[test]
@@ -653,6 +792,21 @@ fn analysis_owns_checker_type_errors_by_checked_path() {
     );
 
     assert_path_has_diagnostic(&analysis, &lib_path, "expected `Int`, found `Text`");
+}
+
+#[test]
+fn analysis_owns_lambda_diagnostics_by_checked_path() {
+    let lib_path = PathBuf::from("examples/phase-1/lib.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source("examples/phase-1/lib.fx", "bad() : Int\n  x -> x\n")],
+    );
+
+    assert_path_has_diagnostic(
+        &analysis,
+        &lib_path,
+        "lambda requires an expected function type",
+    );
 }
 
 fn todo_graph() -> fx_core::ModuleGraph {

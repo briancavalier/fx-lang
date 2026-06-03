@@ -101,6 +101,11 @@ pub enum TypeExpr {
         args: Vec<TypeExpr>,
         span: Span,
     },
+    Function {
+        params: Vec<TypeExpr>,
+        result: Box<TypeExpr>,
+        span: Span,
+    },
     Record {
         fields: Vec<FieldType>,
         span: Span,
@@ -124,6 +129,7 @@ impl TypeExpr {
             TypeExpr::Named { span, .. }
             | TypeExpr::Var(Name { span, .. })
             | TypeExpr::App { span, .. }
+            | TypeExpr::Function { span, .. }
             | TypeExpr::Record { span, .. }
             | TypeExpr::Variant { span, .. }
             | TypeExpr::Tuple { span, .. }
@@ -177,6 +183,11 @@ pub enum Expr {
         fields: Vec<FieldExpr>,
         span: Span,
     },
+    Lambda {
+        params: Vec<LambdaParam>,
+        body: Block,
+        span: Span,
+    },
     Field {
         target: Box<Expr>,
         field: Name,
@@ -220,6 +231,7 @@ impl Expr {
             | Expr::List { span, .. }
             | Expr::Record { span, .. }
             | Expr::RecordUpdate { span, .. }
+            | Expr::Lambda { span, .. }
             | Expr::Field { span, .. }
             | Expr::Call { span, .. }
             | Expr::If { span, .. }
@@ -242,6 +254,12 @@ pub enum BinaryOp {
 pub struct FieldExpr {
     pub name: Name,
     pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LambdaParam {
+    pub name: Option<Name>,
     pub span: Span,
 }
 
