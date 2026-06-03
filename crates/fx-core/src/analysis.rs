@@ -224,6 +224,13 @@ fn local_definition_in_expr(
         Expr::Record { fields, .. } => fields
             .iter()
             .find_map(|field| local_definition_in_expr(&field.value, byte_offset, locals, module)),
+        Expr::RecordUpdate { base, fields, .. } => {
+            local_definition_in_expr(base, byte_offset, locals, module).or_else(|| {
+                fields.iter().find_map(|field| {
+                    local_definition_in_expr(&field.value, byte_offset, locals, module)
+                })
+            })
+        }
         Expr::Field { target, .. } => local_definition_in_expr(target, byte_offset, locals, module),
         Expr::Call { callee, args, .. } => {
             local_definition_in_expr(callee, byte_offset, locals, module).or_else(|| {

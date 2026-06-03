@@ -395,9 +395,23 @@ impl Parser {
 
     fn record_expr(&mut self) -> Expr {
         let start = self.expect(TokenKind::LBrace, "expected `{`").start;
-        let mut fields = Vec::new();
         self.skip_delimited_ws();
+        if self.eat(TokenKind::Spread).is_some() {
+            return self.record_update_expr(start);
+        }
+        let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Spread) {
+                let span = self.bump().span;
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "record update spread must appear first",
+                ));
+                self.expr();
+                self.eat(TokenKind::Comma);
+                self.skip_delimited_ws();
+                continue;
+            }
             let field_start = self.peek().span.start;
             let name = self
                 .expect_ident("expected record field name")
@@ -413,6 +427,46 @@ impl Parser {
             .expect(TokenKind::RBrace, "expected `}` after record")
             .end;
         Expr::Record {
+            fields,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn record_update_expr(&mut self, start: usize) -> Expr {
+        let base = self.expr();
+        let mut fields = Vec::new();
+        let mut reported_missing_fields = false;
+        if self.eat(TokenKind::Comma).is_none() {
+            self.diagnostics.push(Diagnostic::new(
+                base.span(),
+                "record update requires at least one field",
+            ));
+            reported_missing_fields = true;
+        }
+        self.skip_delimited_ws();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let field_start = self.peek().span.start;
+            let name = self
+                .expect_ident("expected record update field name")
+                .unwrap_or_else(|| error_name(field_start));
+            self.expect(TokenKind::Colon, "expected `:` after field name");
+            let value = self.expr();
+            let span = name.span.join(value.span());
+            fields.push(FieldExpr { name, value, span });
+            self.eat(TokenKind::Comma);
+            self.skip_delimited_ws();
+        }
+        if fields.is_empty() && !reported_missing_fields {
+            self.diagnostics.push(Diagnostic::new(
+                base.span(),
+                "record update requires at least one field",
+            ));
+        }
+        let end = self
+            .expect(TokenKind::RBrace, "expected `}` after record update")
+            .end;
+        Expr::RecordUpdate {
+            base: Box::new(base),
             fields,
             span: Span::new(start, end),
         }

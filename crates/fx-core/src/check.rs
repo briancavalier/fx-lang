@@ -203,6 +203,7 @@ impl ModuleChecker<'_> {
                     .map(|field| (field.name.text.clone(), self.infer_expr(&field.value, env)))
                     .collect(),
             ),
+            Expr::RecordUpdate { base, fields, .. } => self.infer_record_update(base, fields, env),
             Expr::Field { target, field, .. } => {
                 let target_ty = self.infer_expr(target, env);
                 match self.expand_alias(&target_ty) {
@@ -339,6 +340,62 @@ impl ModuleChecker<'_> {
                 }
             }
             Expr::Error { .. } => Type::Unknown,
+        }
+    }
+
+    fn infer_record_update(
+        &mut self,
+        base: &Expr,
+        updates: &[FieldExpr],
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let base_ty = self.infer_expr(base, env);
+        let expanded = self.expand_alias(&base_ty);
+        let Type::Record(mut fields) = expanded else {
+            if !matches!(expanded, Type::Unknown) {
+                self.diagnostics.push(Diagnostic::new(
+                    base.span(),
+                    format!("record update requires a record, found `{base_ty}`"),
+                ));
+            }
+            for update in updates {
+                self.infer_expr(&update.value, env);
+            }
+            return Type::Unknown;
+        };
+
+        for update in updates {
+            let value_ty = self.infer_expr(&update.value, env);
+            if let Some(index) = fields
+                .iter()
+                .position(|(name, _)| name == &update.name.text)
+            {
+                let expected = fields[index].1.clone();
+                self.add_typed_span(
+                    update.name.span,
+                    TypedSpanKind::Field,
+                    &update.name.text,
+                    &expected,
+                );
+                if !self.compatible(&value_ty, &expected) {
+                    self.diagnostics.push(Diagnostic::new(
+                        update.value.span(),
+                        format!("expected `{expected}`, found `{value_ty}`"),
+                    ));
+                }
+                fields[index].1 = value_ty;
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    update.name.span,
+                    format!("unknown record field `{}`", update.name.text),
+                ));
+            }
+        }
+
+        match base_ty {
+            Type::Record(_) => Type::Record(fields),
+            Type::Named { .. } => base_ty,
+            _ => Type::Unknown,
         }
     }
 

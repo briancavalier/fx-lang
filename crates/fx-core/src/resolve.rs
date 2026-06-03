@@ -213,6 +213,12 @@ impl ModuleResolver<'_> {
                     self.resolve_expr(&field.value, locals);
                 }
             }
+            Expr::RecordUpdate { base, fields, .. } => {
+                self.resolve_expr(base, locals);
+                for field in fields {
+                    self.resolve_expr(&field.value, locals);
+                }
+            }
             Expr::Field { target, .. } => self.resolve_expr(target, locals),
             Expr::Call { callee, args, .. } => {
                 self.resolve_expr(callee, locals);

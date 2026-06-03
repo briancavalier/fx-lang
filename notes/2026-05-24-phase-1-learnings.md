@@ -140,3 +140,16 @@ evidence that produced them.
   core symbol facts rather than ad hoc parsing in the LSP layer.
 - Revisit when: Core gains declaration ranges, module symbols, or finer symbol
   hierarchy facts.
+
+- Decision: Use spread-first syntax for closed Phase 1 record update:
+  `{ ...record, field: value }`.
+- Context: Record update now has a distinct surface AST node. The checker
+  requires the base to be a known closed record or record alias, rejects unknown
+  fields, checks update value types against existing field types, and preserves
+  record aliases for successful updates.
+- Applies to phase(s): Phase 1.
+- Future implication: Phase 2 row-polymorphic update should build on this
+  syntax without changing the Phase 1 closed-record behavior. Spread-not-first
+  update syntax remains invalid.
+- Revisit when: Open row updates or field addition through row variables are
+  implemented.

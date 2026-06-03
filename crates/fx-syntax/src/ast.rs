@@ -172,6 +172,11 @@ pub enum Expr {
         fields: Vec<FieldExpr>,
         span: Span,
     },
+    RecordUpdate {
+        base: Box<Expr>,
+        fields: Vec<FieldExpr>,
+        span: Span,
+    },
     Field {
         target: Box<Expr>,
         field: Name,
@@ -214,6 +219,7 @@ impl Expr {
             | Expr::Unit { span }
             | Expr::List { span, .. }
             | Expr::Record { span, .. }
+            | Expr::RecordUpdate { span, .. }
             | Expr::Field { span, .. }
             | Expr::Call { span, .. }
             | Expr::If { span, .. }

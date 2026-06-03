@@ -38,6 +38,20 @@ fn checker_runs_on_phase_1_todo_fixture() {
 }
 
 #[test]
+fn checker_runs_on_phase_1_record_update_fixture() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-1/record-update.fx"),
+            source: include_str!("../../../examples/phase-1/record-update.fx").to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
 fn reports_duplicate_definitions() {
     let graph = index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -196,6 +210,96 @@ bad(todo: Todo) : Int
 }
 
 #[test]
+fn checks_record_alias_updates() {
+    let result = check_single(
+        "record.fx",
+        r#"type Todo = {
+  id: Int,
+  done: Bool
+}
+
+mark-done(todo: Todo) : Todo
+  { ...todo, done: true }
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_structural_record_updates() {
+    let result = check_single(
+        "record.fx",
+        r#"mark-done() : { id: Int, done: Bool }
+  todo =
+    { id: 1, done: false }
+
+  { ...todo, done: true }
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_unknown_record_update_fields() {
+    let result = check_single(
+        "record.fx",
+        r#"type Todo = {
+  id: Int
+}
+
+bad(todo: Todo) : Todo
+  { ...todo, done: true }
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown record field `done`"))
+    );
+}
+
+#[test]
+fn reports_record_update_value_type_mismatches() {
+    let result = check_single(
+        "record.fx",
+        r#"type Todo = {
+  done: Bool
+}
+
+bad(todo: Todo) : Todo
+  { ...todo, done: "yes" }
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Bool`, found `Text`"))
+    );
+}
+
+#[test]
+fn reports_record_update_non_record_bases() {
+    let result = check_single(
+        "record.fx",
+        r#"bad(value: Int) : Int
+  { ...value, done: true }
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("record update requires a record")
+    }));
+}
+
+#[test]
 fn reports_constructor_arity_mismatches() {
     let result = check_single(
         "variant.fx",
@@ -344,6 +448,26 @@ pick(todo: Todo, todos: List Todo) : Text
 }
 
 #[test]
+fn hovers_record_update_fields() {
+    let source_text = r#"type Todo = {
+  done: Bool
+}
+
+mark-done(todo: Todo) : Todo
+  { ...todo, done: true }
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "done: true"))
+            .expect("field hover")
+            .contents,
+        "done : Bool"
+    );
+}
+
+#[test]
 fn definition_finds_local_parameter_and_binding_targets() {
     let source_text = r#"main(input: Int) : Int
   doubled =
@@ -362,6 +486,22 @@ fn definition_finds_local_parameter_and_binding_targets() {
         .definition_at("main", offset_of(source_text, "doubled\n"))
         .expect("doubled definition");
     assert_eq!(doubled_def.span.start, offset_of(source_text, "doubled ="));
+}
+
+#[test]
+fn definition_finds_record_update_base_targets() {
+    let source_text = r#"type Todo = { done: Bool }
+
+mark-done(todo: Todo) : Todo
+  { ...todo, done: true }
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let todo_def = analysis
+        .definition_at("main", offset_of(source_text, "...todo") + "...".len())
+        .expect("todo definition");
+
+    assert_eq!(todo_def.span.start, offset_of(source_text, "todo: Todo"));
 }
 
 #[test]

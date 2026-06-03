@@ -65,3 +65,72 @@ fn parses_match_with_list_rest_pattern() {
     };
     assert!(matches!(value.body.result.as_ref(), Expr::Match { .. }));
 }
+
+#[test]
+fn parses_record_update() {
+    let parsed = parse_file(
+        r#"mark-done(todo: Todo) : Todo
+  { ...todo, done: true }
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    assert!(matches!(
+        value.body.result.as_ref(),
+        Expr::RecordUpdate { .. }
+    ));
+}
+
+#[test]
+fn parses_multiline_record_update() {
+    let parsed = parse_file(
+        r#"mark-done(todo: Todo) : Todo
+  {
+    ...todo,
+    done: true
+  }
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    assert!(matches!(
+        value.body.result.as_ref(),
+        Expr::RecordUpdate { .. }
+    ));
+}
+
+#[test]
+fn reports_record_update_without_fields() {
+    let parsed = parse_file(
+        r#"same(todo: Todo) : Todo
+  { ...todo }
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("record update requires at least one field")
+    }));
+}
+
+#[test]
+fn reports_record_update_spread_not_first() {
+    let parsed = parse_file(
+        r#"bad(todo: Todo) : Todo
+  { done: true, ...todo }
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("record update spread must appear first")
+    }));
+}
