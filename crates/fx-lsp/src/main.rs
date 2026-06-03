@@ -1,4 +1,6 @@
-use fx_core::{Analysis, AnalysisDiagnostic, SourceFile, analyze_workspace};
+use fx_core::{
+    Analysis, AnalysisDiagnostic, SourceFile, Symbol, SymbolKind as FxSymbolKind, analyze_workspace,
+};
 use fx_syntax::span::Span;
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,9 +10,11 @@ use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeParams, InitializeResult, Location, MarkedString, OneOf, Position,
-    Range, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeParams, InitializeResult, Location, MarkedString, OneOf, Position, Range,
+    ServerCapabilities, SymbolInformation, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Url, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -53,6 +57,8 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(tower_lsp::lsp_types::HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: None,
@@ -146,6 +152,32 @@ impl LanguageServer for Backend {
             range: target_line_index.span_to_range(definition.span),
         })))
     }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
+            return Ok(None);
+        };
+        Ok(Some(DocumentSymbolResponse::Nested(
+            document_symbols_for_document(&snapshot.analysis, &snapshot.document),
+        )))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let Some(analysis) = self.analysis_for_workspace().await else {
+            return Ok(None);
+        };
+        Ok(Some(workspace_symbols_for_analysis(
+            &analysis,
+            params.query.as_str(),
+        )))
+    }
 }
 
 impl Backend {
@@ -195,6 +227,161 @@ impl Backend {
             document,
             open_documents,
         })
+    }
+
+    async fn analysis_for_workspace(&self) -> Option<Analysis> {
+        let state = self.state.lock().await;
+        let open_documents = state.documents.values().cloned().collect::<Vec<_>>();
+        let root = state.root.clone().or_else(|| {
+            open_documents
+                .first()
+                .and_then(|document| document.path.parent().map(Path::to_path_buf))
+        })?;
+        drop(state);
+
+        Some(analyze_workspace(
+            &root,
+            workspace_files_with_open_overlays(&root, &open_documents),
+        ))
+    }
+}
+
+fn workspace_files_with_open_overlays(root: &Path, open_documents: &[Document]) -> Vec<SourceFile> {
+    let mut files = collect_workspace_files(root);
+    for document in open_documents {
+        if let Some(existing) = files.iter_mut().find(|file| file.path == document.path) {
+            existing.source = document.text.clone();
+        } else {
+            files.push(SourceFile {
+                path: document.path.clone(),
+                source: document.text.clone(),
+            });
+        }
+    }
+    files
+}
+
+fn document_symbols_for_document(analysis: &Analysis, document: &Document) -> Vec<DocumentSymbol> {
+    let Some(module) = analysis.module_for_path(&document.path) else {
+        return Vec::new();
+    };
+    let Some(indexed) = analysis.graph.modules.get(module) else {
+        return Vec::new();
+    };
+    let children = indexed
+        .symbols
+        .iter()
+        .map(|symbol| document_symbol_for_indexed_symbol(symbol, &document.line_index))
+        .collect::<Vec<_>>();
+    vec![module_document_symbol(
+        module,
+        indexed.parsed.source.len(),
+        &document.line_index,
+        children,
+    )]
+}
+
+#[allow(deprecated)]
+fn module_document_symbol(
+    module: &str,
+    source_len: usize,
+    line_index: &LineIndex,
+    children: Vec<DocumentSymbol>,
+) -> DocumentSymbol {
+    DocumentSymbol {
+        name: module.to_string(),
+        detail: Some("module".to_string()),
+        kind: LspSymbolKind::MODULE,
+        tags: None,
+        deprecated: None,
+        range: line_index.span_to_range(Span::new(0, source_len)),
+        selection_range: line_index.span_to_range(Span::point(0)),
+        children: Some(children),
+    }
+}
+
+#[allow(deprecated)]
+fn document_symbol_for_indexed_symbol(symbol: &Symbol, line_index: &LineIndex) -> DocumentSymbol {
+    DocumentSymbol {
+        name: symbol.name.clone(),
+        detail: Some(symbol.qualified_name.clone()),
+        kind: lsp_symbol_kind(symbol.kind),
+        tags: None,
+        deprecated: None,
+        range: line_index.span_to_range(symbol.span),
+        selection_range: line_index.span_to_range(symbol.span),
+        children: None,
+    }
+}
+
+fn workspace_symbols_for_analysis(analysis: &Analysis, query: &str) -> Vec<SymbolInformation> {
+    let query = query.to_lowercase();
+    let mut symbols = Vec::new();
+    for module in analysis.graph.modules.values() {
+        if module.name.to_lowercase().contains(&query)
+            && let Some(symbol) = module_symbol_information(module)
+        {
+            symbols.push(symbol);
+        }
+        for symbol in &module.symbols {
+            if workspace_symbol_matches(symbol, &query)
+                && let Some(info) = symbol_information_for_indexed_symbol(module, symbol)
+            {
+                symbols.push(info);
+            }
+        }
+    }
+    symbols
+}
+
+fn workspace_symbol_matches(symbol: &Symbol, query: &str) -> bool {
+    symbol.name.to_lowercase().contains(query)
+        || symbol.qualified_name.to_lowercase().contains(query)
+        || symbol.module.to_lowercase().contains(query)
+}
+
+#[allow(deprecated)]
+fn module_symbol_information(module: &fx_core::module::IndexedModule) -> Option<SymbolInformation> {
+    let uri = Url::from_file_path(&module.path).ok()?;
+    let line_index = LineIndex::new(&module.parsed.source);
+    Some(SymbolInformation {
+        name: module.name.clone(),
+        kind: LspSymbolKind::MODULE,
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri,
+            range: line_index.span_to_range(Span::new(0, module.parsed.source.len())),
+        },
+        container_name: None,
+    })
+}
+
+#[allow(deprecated)]
+fn symbol_information_for_indexed_symbol(
+    module: &fx_core::module::IndexedModule,
+    symbol: &Symbol,
+) -> Option<SymbolInformation> {
+    let uri = Url::from_file_path(&module.path).ok()?;
+    let line_index = LineIndex::new(&module.parsed.source);
+    Some(SymbolInformation {
+        name: symbol.name.clone(),
+        kind: lsp_symbol_kind(symbol.kind),
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri,
+            range: line_index.span_to_range(symbol.span),
+        },
+        container_name: Some(symbol.module.clone()),
+    })
+}
+
+fn lsp_symbol_kind(kind: FxSymbolKind) -> LspSymbolKind {
+    match kind {
+        FxSymbolKind::Value => LspSymbolKind::FUNCTION,
+        FxSymbolKind::Type => LspSymbolKind::STRUCT,
+        FxSymbolKind::Constructor => LspSymbolKind::CONSTRUCTOR,
     }
 }
 
@@ -323,12 +510,15 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, LineIndex, lsp_diagnostics_for_document};
-    use fx_core::AnalysisDiagnostic;
+    use super::{
+        Document, LineIndex, document_symbols_for_document, lsp_diagnostics_for_document,
+        workspace_symbols_for_analysis,
+    };
+    use fx_core::{AnalysisDiagnostic, SourceFile, analyze_workspace};
     use fx_syntax::span::Span;
     use std::path::PathBuf;
-    use tower_lsp::lsp_types::Position;
     use tower_lsp::lsp_types::Url;
+    use tower_lsp::lsp_types::{Position, SymbolKind};
 
     #[test]
     fn line_index_converts_multiline_offsets() {
@@ -403,6 +593,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn document_symbols_include_module_and_indexed_children() {
+        let source = "export type Todo = < Done() >\n\nsummarize(todo: Todo) : Text\n  \"ok\"\n";
+        let analysis = analysis_with_files(vec![source_file("/private/tmp/main.fx", source)]);
+        let document = document("/private/tmp/main.fx", source);
+
+        let symbols = document_symbols_for_document(&analysis, &document);
+
+        assert_eq!(symbols[0].name, "main");
+        assert_eq!(symbols[0].kind, SymbolKind::MODULE);
+        let children = symbols[0].children.as_ref().expect("children");
+        assert!(children.iter().any(|symbol| symbol.name == "Todo"));
+        assert!(children.iter().any(|symbol| symbol.name == "Done"));
+        assert!(children.iter().any(|symbol| symbol.name == "summarize"));
+    }
+
+    #[test]
+    fn workspace_symbols_include_modules_and_filter_indexed_symbols() {
+        let analysis = analysis_with_files(vec![
+            source_file("/private/tmp/main.fx", "main() : Int\n  1\n"),
+            source_file("/private/tmp/todo.fx", "export type Todo = < Done() >\n"),
+        ]);
+
+        let todo_symbols = workspace_symbols_for_analysis(&analysis, "todo");
+        let done_symbols = workspace_symbols_for_analysis(&analysis, "done");
+
+        assert!(
+            todo_symbols
+                .iter()
+                .any(|symbol| { symbol.name == "todo" && symbol.kind == SymbolKind::MODULE })
+        );
+        assert!(todo_symbols.iter().any(|symbol| symbol.name == "Todo"));
+        assert!(done_symbols.iter().any(|symbol| symbol.name == "Done"));
+        assert!(!done_symbols.iter().any(|symbol| symbol.name == "main"));
+    }
+
     fn document(path: &str, text: &str) -> Document {
         Document::new(
             Url::from_file_path(path).expect("file url"),
@@ -417,6 +643,17 @@ mod tests {
             path: PathBuf::from("/private/tmp/main.fx"),
             span,
             message: "problem".to_string(),
+        }
+    }
+
+    fn analysis_with_files(files: Vec<SourceFile>) -> fx_core::Analysis {
+        analyze_workspace(&PathBuf::from("/private/tmp"), files)
+    }
+
+    fn source_file(path: &str, source: &str) -> SourceFile {
+        SourceFile {
+            path: PathBuf::from(path),
+            source: source.to_string(),
         }
     }
 }

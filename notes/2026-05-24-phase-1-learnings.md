@@ -127,3 +127,16 @@ evidence that produced them.
   active document's line index.
 - Revisit when: Package roots, generated modules, or cross-file diagnostics need
   richer ownership than a single source path.
+
+- Decision: Build initial document/workspace symbols directly from the Phase 1
+  symbol index, deriving module symbols in the LSP adapter.
+- Context: `fx-lsp` now advertises document and workspace symbol providers.
+  Document symbols present the module as a parent with indexed top-level
+  values, types, and constructors as children. Workspace symbols include
+  derived module entries and indexed symbols filtered by query.
+- Applies to phase(s): Phase 1.
+- Future implication: The current symbol ranges use indexed identifier spans.
+  Richer outline ranges or nested constructor grouping should come from richer
+  core symbol facts rather than ad hoc parsing in the LSP layer.
+- Revisit when: Core gains declaration ranges, module symbols, or finer symbol
+  hierarchy facts.
