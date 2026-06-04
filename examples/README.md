@@ -50,3 +50,19 @@ cargo build -p fx-lsp
 
 Then open the Phase 1 examples and verify diagnostics, hovers,
 go-to-definition, document symbols, and workspace symbols.
+
+## Phase 2
+
+Phase 2 examples are goal targets for row-polymorphic records and variants.
+They are expected to report Phase 2 diagnostics until the corresponding parser,
+checker, diagnostics, hover, and go-to-definition support lands.
+
+- `phase-2/rows.fx`
+
+Try the current Phase 2 goal target:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-2/rows.fx
+```
+
+This command is expected to fail until Phase 2 row support is implemented.
