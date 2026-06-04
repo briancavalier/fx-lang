@@ -67,6 +67,23 @@ fn parses_match_with_list_rest_pattern() {
 }
 
 #[test]
+fn parses_binary_operator_spans() {
+    let source = r#"add(left: Int, right: Int) : Int
+  left + right
+"#;
+    let parsed = parse_file(source);
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    let Expr::Binary { op_span, .. } = value.body.result.as_ref() else {
+        panic!("expected binary expression");
+    };
+    assert_eq!(&source[op_span.start..op_span.end], "+");
+}
+
+#[test]
 fn parses_phase_1_pattern_shapes() {
     let parsed = parse_file(
         r#"type Todo = { title: Text, done: Bool }

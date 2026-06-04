@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod check;
 pub mod module;
+pub(crate) mod prelude;
 pub mod resolve;
 
 pub use analysis::{Analysis, AnalysisDiagnostic, DefinitionInfo, HoverInfo, analyze_workspace};

@@ -177,3 +177,14 @@ evidence that produced them.
   pattern syntax.
 - Revisit when: Exhaustiveness/redundancy checking, row-polymorphic patterns,
   tuple patterns, or pattern lambda parameters are implemented.
+
+- Decision: Keep the Phase 1 prelude compiler-known and non-importable.
+- Context: Primitive types, `unit`, and built-in operators are semantic
+  compiler data rather than synthesized `std` modules. Operator checking uses
+  explicit built-in signatures for `+`, `-`, `++`, and `==`, and the checker
+  emits typed spans for operator hovers.
+- Applies to phase(s): Phase 1.
+- Future implication: Importable standard-library modules can be added later
+  without changing Phase 1 operator semantics or document/workspace symbols.
+- Revisit when: A source-backed stdlib, typeclass-like equality, numeric
+  overloading, or effectful `std.io` support is implemented.

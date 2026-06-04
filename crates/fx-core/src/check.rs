@@ -1,4 +1,5 @@
 use crate::module::{IndexedModule, ModuleGraph, Symbol, SymbolKind};
+use crate::prelude::{binary_operator, primitive_value};
 use crate::resolve::{
     SymbolTables, qualified_expr_name, qualified_root_is_local, resolve_visible_symbol,
     resolve_workspace,
@@ -414,33 +415,57 @@ impl ModuleChecker<'_> {
                 found
             }
             Expr::Binary {
-                op, left, right, ..
-            } => {
-                let left_ty = self.infer_expr(left, env);
-                let right_ty = self.infer_expr(right, env);
-                match op {
-                    BinaryOp::Equal => {
-                        if !self.compatible(&left_ty, &right_ty) {
-                            self.diagnostics.push(Diagnostic::new(
-                                right.span(),
-                                format!("cannot compare `{left_ty}` with `{right_ty}`"),
-                            ));
-                        }
-                        Type::Bool
-                    }
-                    BinaryOp::Concat => {
-                        if !self.compatible(&left_ty, &Type::Text)
-                            || !self.compatible(&right_ty, &Type::Text)
-                        {
-                            self.diagnostics
-                                .push(Diagnostic::new(expr.span(), "`++` expects `Text` operands"));
-                        }
-                        Type::Text
-                    }
-                    BinaryOp::Add | BinaryOp::Subtract => Type::Int,
-                }
-            }
+                op,
+                op_span,
+                left,
+                right,
+                ..
+            } => self.infer_binary_expr(*op, *op_span, left, right, env),
             Expr::Error { .. } => Type::Unknown,
+        }
+    }
+
+    fn infer_binary_expr(
+        &mut self,
+        op: BinaryOp,
+        op_span: Span,
+        left: &Expr,
+        right: &Expr,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let left_ty = self.infer_expr(left, env);
+        let right_ty = self.infer_expr(right, env);
+
+        let operator = binary_operator(op, &left_ty, &right_ty);
+        self.add_typed_span(
+            op_span,
+            TypedSpanKind::Value,
+            operator.label,
+            &operator.display_type,
+        );
+
+        if matches!(op, BinaryOp::Equal) {
+            if !self.compatible(&left_ty, &right_ty) {
+                self.diagnostics.push(Diagnostic::new(
+                    right.span(),
+                    format!("cannot compare `{left_ty}` with `{right_ty}`"),
+                ));
+            }
+            return operator.result;
+        }
+
+        self.check_operator_operand(operator.label, left, &left_ty, &operator.params[0]);
+        self.check_operator_operand(operator.label, right, &right_ty, &operator.params[1]);
+
+        operator.result
+    }
+
+    fn check_operator_operand(&mut self, label: &str, expr: &Expr, found: &Type, expected: &Type) {
+        if !self.compatible(found, expected) {
+            self.diagnostics.push(Diagnostic::new(
+                expr.span(),
+                format!("`{label}` expects `{expected}` operands, found `{found}`"),
+            ));
         }
     }
 
@@ -680,6 +705,10 @@ impl ModuleChecker<'_> {
     fn resolve_expr_name(&mut self, name: &str, span: Span, env: &BTreeMap<String, Type>) -> Type {
         if let Some(ty) = env.get(name) {
             return ty.clone();
+        }
+
+        if let Some(ty) = primitive_value(name) {
+            return ty;
         }
 
         match resolve_visible_symbol(self.module, self.symbol_tables, name, None) {

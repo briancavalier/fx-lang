@@ -80,6 +80,20 @@ fn checker_runs_on_phase_1_patterns_fixture() {
 }
 
 #[test]
+fn checker_runs_on_phase_1_operators_fixture() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-1/operators.fx"),
+            source: include_str!("../../../examples/phase-1/operators.fx").to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
 fn reports_duplicate_definitions() {
     let graph = index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -324,6 +338,86 @@ fn reports_record_update_non_record_bases() {
         diagnostic
             .message
             .contains("record update requires a record")
+    }));
+}
+
+#[test]
+fn checks_phase_1_prelude_operators_and_unit() {
+    let result = check_single(
+        "operators.fx",
+        r#"unit-value() : Unit
+  unit
+
+add(left: Int, right: Int) : Int
+  left + right
+
+subtract(left: Int, right: Int) : Int
+  left - right
+
+join(left: Text, right: Text) : Text
+  left ++ right
+
+same(left: Int, right: Int) : Bool
+  left == right
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_add_and_subtract_operand_mismatches() {
+    let result = check_single(
+        "operators.fx",
+        r#"bad-add(value: Text) : Int
+  value + 1
+
+bad-subtract(value: Bool) : Int
+  1 - value
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`+` expects `Int` operands, found `Text`")
+    }));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`-` expects `Int` operands, found `Bool`")
+    }));
+}
+
+#[test]
+fn reports_concat_operand_mismatches() {
+    let result = check_single(
+        "operators.fx",
+        r#"bad(value: Int) : Text
+  "id " ++ value
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`++` expects `Text` operands, found `Int`")
+    }));
+}
+
+#[test]
+fn reports_equality_operand_mismatches() {
+    let result = check_single(
+        "operators.fx",
+        r#"bad(value: Int) : Bool
+  value == "nope"
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot compare `Int` with `Text`")
     }));
 }
 
@@ -781,6 +875,49 @@ label(result: Result) : Int
 }
 
 #[test]
+fn hovers_phase_1_operators() {
+    let source_text = r#"operators(left: Int, right: Int, text: Text) : Bool
+  value =
+    left + right - 1
+
+  label =
+    text ++ "!"
+
+  value == right
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "+"))
+            .expect("add hover")
+            .contents,
+        "+ : (Int, Int) -> Int"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "-"))
+            .expect("subtract hover")
+            .contents,
+        "- : (Int, Int) -> Int"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "++"))
+            .expect("concat hover")
+            .contents,
+        "++ : (Text, Text) -> Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "=="))
+            .expect("equality hover")
+            .contents,
+        "== : (Int, Int) -> Bool"
+    );
+}
+
+#[test]
 fn hovers_lambda_parameters() {
     let source_text = r#"apply(f: Int -> Int, value: Int) : Int
   f(value)
@@ -1034,6 +1171,20 @@ fn analysis_owns_lambda_diagnostics_by_checked_path() {
         &lib_path,
         "lambda requires an expected function type",
     );
+}
+
+#[test]
+fn analysis_owns_operator_diagnostics_by_checked_path() {
+    let lib_path = PathBuf::from("examples/phase-1/lib.fx");
+    let analysis = analyze_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![source(
+            "examples/phase-1/lib.fx",
+            "bad(value: Text) : Int\n  value + 1\n",
+        )],
+    );
+
+    assert_path_has_diagnostic(&analysis, &lib_path, "`+` expects `Int` operands");
 }
 
 fn todo_graph() -> fx_core::ModuleGraph {

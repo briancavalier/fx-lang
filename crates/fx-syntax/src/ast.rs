@@ -211,6 +211,7 @@ pub enum Expr {
     },
     Binary {
         op: BinaryOp,
+        op_span: Span,
         left: Box<Expr>,
         right: Box<Expr>,
         span: Span,

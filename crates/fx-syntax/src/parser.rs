@@ -226,11 +226,12 @@ impl Parser {
             if prec < min_prec {
                 break;
             }
-            self.bump();
+            let op_span = self.bump().span;
             let right = self.binary_expr(prec + 1);
             let span = left.span().join(right.span());
             left = Expr::Binary {
                 op,
+                op_span,
                 left: Box::new(left),
                 right: Box::new(right),
                 span,
