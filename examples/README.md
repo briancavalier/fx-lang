@@ -12,3 +12,41 @@ go-to-definition fixtures.
 Keep examples compact and focused on the phase they belong to. Avoid reaching
 for later-phase features unless the example is intentionally documenting a
 boundary that should still fail.
+
+## Phase 1
+
+Phase 1 examples are expected to parse and check successfully:
+
+- `phase-1/todo.fx`
+- `phase-1/record-update.fx`
+- `phase-1/lambda.fx`
+- `phase-1/patterns.fx`
+- `phase-1/operators.fx`
+
+Try all Phase 1 examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-1
+```
+
+Try a single file:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-1/todo.fx
+```
+
+Use JSON output for scripts:
+
+```sh
+cargo run -q -p fx-cli -- check --json examples/phase-1
+```
+
+For VS Code smoke testing, rebuild the language server and open the extension
+host:
+
+```sh
+cargo build -p fx-lsp
+```
+
+Then open the Phase 1 examples and verify diagnostics, hovers,
+go-to-definition, document symbols, and workspace symbols.

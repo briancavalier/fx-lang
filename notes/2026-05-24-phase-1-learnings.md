@@ -201,3 +201,15 @@ evidence that produced them.
   output, color, or diagnostic metadata.
 - Revisit when: Diagnostic severities, codes, suggestions, color, or watch mode
   are implemented.
+
+- Decision: Treat Phase 1 as accepted after the closure sweep.
+- Context: The acceptance sweep passed `cargo fmt --all --check`,
+  `cargo test`, `cargo clippy --all-targets -- -D warnings`,
+  `npm run compile` in `editors/vscode-fx`, and
+  `cargo run -q -p fx-cli -- check examples/phase-1`.
+- Applies to phase(s): Phase 1.
+- Future implication: Phase 2 can start from the current Rust-first parser,
+  core analysis, CLI, LSP, and example fixtures without widening Phase 1.
+- Revisit when: Open rows, effects, handlers, coeffects, named scopes,
+  refs/mutation, a richer stdlib, exhaustiveness/redundancy checking, or parser
+  recovery hardening are implemented.
