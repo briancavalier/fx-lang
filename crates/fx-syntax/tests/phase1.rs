@@ -29,24 +29,150 @@ export type TodoResult a = < Ok(a), NotFound(Int) >
     let Item::Type(record) = &parsed.module.items[0] else {
         panic!("expected record type");
     };
-    assert!(matches!(record.body, TypeExpr::Record { .. }));
+    assert!(matches!(record.body, TypeExpr::Record { tail: None, .. }));
 
     let Item::Type(variant) = &parsed.module.items[1] else {
         panic!("expected variant type");
     };
-    assert!(matches!(variant.body, TypeExpr::Variant { .. }));
+    assert!(matches!(variant.body, TypeExpr::Variant { tail: None, .. }));
 }
 
 #[test]
-fn reports_later_phase_open_rows() {
-    let parsed = parse_file("type Person r = { name: Text, ...r }\n");
+fn parses_open_record_rows() {
+    let source = "type Person r = { name: Text, ...r }\n";
+    let parsed = parse_file(source);
 
-    assert!(
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Type(record) = &parsed.module.items[0] else {
+        panic!("expected record type");
+    };
+    let TypeExpr::Record { fields, tail, .. } = &record.body else {
+        panic!("expected record body");
+    };
+    assert_eq!(fields.len(), 1);
+    let tail = tail.as_ref().expect("expected row tail");
+    assert_eq!(tail.name.text, "r");
+    assert_eq!(&source[tail.span.start..tail.span.end], "...r");
+    assert_eq!(&source[tail.name.span.start..tail.name.span.end], "r");
+}
+
+#[test]
+fn parses_open_variant_rows() {
+    let source = "type Result a r = < Ok(a), Error(Text), ...r >\n";
+    let parsed = parse_file(source);
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Type(variant) = &parsed.module.items[0] else {
+        panic!("expected variant type");
+    };
+    let TypeExpr::Variant { cases, tail, .. } = &variant.body else {
+        panic!("expected variant body");
+    };
+    assert_eq!(cases.len(), 2);
+    let tail = tail.as_ref().expect("expected row tail");
+    assert_eq!(tail.name.text, "r");
+    assert_eq!(&source[tail.span.start..tail.span.end], "...r");
+    assert_eq!(&source[tail.name.span.start..tail.name.span.end], "r");
+}
+
+#[test]
+fn parses_row_tails_with_trailing_commas() {
+    let parsed = parse_file(
+        r#"type Person r = { name: Text, ...r, }
+type Result r = < Ok(Text), ...r, >
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Type(record) = &parsed.module.items[0] else {
+        panic!("expected record type");
+    };
+    assert!(matches!(
+        record.body,
+        TypeExpr::Record { tail: Some(_), .. }
+    ));
+
+    let Item::Type(variant) = &parsed.module.items[1] else {
+        panic!("expected variant type");
+    };
+    assert!(matches!(
+        variant.body,
+        TypeExpr::Variant { tail: Some(_), .. }
+    ));
+}
+
+#[test]
+fn reports_non_final_row_spreads() {
+    let parsed = parse_file(
+        r#"type Person r = { name: Text, ...r, age: Int }
+type Result r = < Ok(Text), ...r, Error(Text) >
+"#,
+    );
+
+    assert_eq!(
         parsed
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("Phase 2"))
+            .filter(|diagnostic| diagnostic.message.contains("row spread must appear last"))
+            .count(),
+        2
     );
+}
+
+#[test]
+fn reports_duplicate_row_spreads() {
+    let parsed = parse_file(
+        r#"type Person r s = { name: Text, ...r, ...s }
+type Result r s = < Ok(Text), ...r, ...s >
+"#,
+    );
+
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("duplicate row spread"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn reports_missing_row_tail_names() {
+    let parsed = parse_file(
+        r#"type Person r = { name: Text, ... }
+type Result r = < Ok(Text), ... >
+"#,
+    );
+
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic
+                .message
+                .contains("expected row variable name after `...`"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn reports_standalone_row_spreads() {
+    let parsed = parse_file("type Tail r = ...r\n");
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("row spread is only valid in record or variant types")
+    }));
+}
+
+#[test]
+fn parses_phase_2_rows_goal_fixture() {
+    let parsed = parse_file(include_str!("../../../examples/phase-2/rows.fx"));
+
+    assert_eq!(parsed.diagnostics, []);
 }
 
 #[test]

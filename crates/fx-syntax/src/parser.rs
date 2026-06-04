@@ -731,7 +731,7 @@ impl Parser {
                 let span = self.bump().span;
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "open rows are deferred until Phase 2",
+                    "row spread is only valid in record or variant types",
                 ));
                 TypeExpr::Error { span }
             }
@@ -747,15 +747,23 @@ impl Parser {
     fn record_type(&mut self) -> TypeExpr {
         let start = self.expect(TokenKind::LBrace, "expected `{`").start;
         let mut fields = Vec::new();
+        let mut tail = None;
         self.skip_delimited_ws();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             if self.at(TokenKind::Spread) {
-                let span = self.bump().span;
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "open record rows are deferred until Phase 2",
-                ));
-                break;
+                if tail.is_some() {
+                    self.error_here("duplicate row spread");
+                    self.bump();
+                    self.expect_ident("expected row variable name after `...`");
+                } else {
+                    tail = Some(self.row_tail());
+                }
+                self.eat(TokenKind::Comma);
+                self.skip_delimited_ws();
+                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.error_here("row spread must appear last");
+                }
+                continue;
             }
             let field_start = self.peek().span.start;
             let name = self
@@ -773,6 +781,7 @@ impl Parser {
             .end;
         TypeExpr::Record {
             fields,
+            tail,
             span: Span::new(start, end),
         }
     }
@@ -780,15 +789,23 @@ impl Parser {
     fn variant_type(&mut self) -> TypeExpr {
         let start = self.expect(TokenKind::LAngle, "expected `<`").start;
         let mut cases = Vec::new();
+        let mut tail = None;
         self.skip_delimited_ws();
         while !self.at(TokenKind::RAngle) && !self.at(TokenKind::Eof) {
             if self.at(TokenKind::Spread) {
-                let span = self.bump().span;
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "open variant rows are deferred until Phase 2",
-                ));
-                break;
+                if tail.is_some() {
+                    self.error_here("duplicate row spread");
+                    self.bump();
+                    self.expect_ident("expected row variable name after `...`");
+                } else {
+                    tail = Some(self.row_tail());
+                }
+                self.eat(TokenKind::Comma);
+                self.skip_delimited_ws();
+                if !self.at(TokenKind::RAngle) && !self.at(TokenKind::Eof) {
+                    self.error_here("row spread must appear last");
+                }
+                continue;
             }
             let case_start = self.peek().span.start;
             let name = self
@@ -818,7 +835,19 @@ impl Parser {
             .end;
         TypeExpr::Variant {
             cases,
+            tail,
             span: Span::new(start, end),
+        }
+    }
+
+    fn row_tail(&mut self) -> RowTail {
+        let start = self.expect(TokenKind::Spread, "expected `...`").start;
+        let name = self
+            .expect_ident("expected row variable name after `...`")
+            .unwrap_or_else(|| error_name(start));
+        RowTail {
+            span: Span::new(start, name.span.end),
+            name,
         }
     }
 

@@ -108,10 +108,12 @@ pub enum TypeExpr {
     },
     Record {
         fields: Vec<FieldType>,
+        tail: Option<RowTail>,
         span: Span,
     },
     Variant {
         cases: Vec<VariantCaseType>,
+        tail: Option<RowTail>,
         span: Span,
     },
     Tuple {
@@ -142,6 +144,12 @@ impl TypeExpr {
 pub struct FieldType {
     pub name: Name,
     pub value: TypeExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RowTail {
+    pub name: Name,
     pub span: Span,
 }
 
