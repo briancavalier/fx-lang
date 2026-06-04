@@ -188,3 +188,16 @@ evidence that produced them.
   without changing Phase 1 operator semantics or document/workspace symbols.
 - Revisit when: A source-backed stdlib, typeclass-like equality, numeric
   overloading, or effectful `std.io` support is implemented.
+
+- Decision: Make `fx check` human-readable by default and keep JSON behind
+  `--json`.
+- Context: The CLI now uses file-owned analysis diagnostics to render
+  `path:line:column` messages with source snippets and carets. This makes the
+  early language easier to try from a terminal while preserving machine-readable
+  check output for scripts.
+- Applies to phase(s): Phase 1.
+- Future implication: Future CLI diagnostic features should keep the default
+  output concise and self-explanatory, adding flags for richer machine-readable
+  output, color, or diagnostic metadata.
+- Revisit when: Diagnostic severities, codes, suggestions, color, or watch mode
+  are implemented.
