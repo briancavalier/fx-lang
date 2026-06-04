@@ -197,7 +197,8 @@ impl ModuleChecker<'_> {
                 let scrutinee_ty = self.infer_expr(scrutinee, env);
                 for arm in arms {
                     let mut arm_env = env.clone();
-                    self.bind_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env);
+                    let mut bound_names = BTreeSet::new();
+                    self.check_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env, &mut bound_names);
                     self.check_expr(&arm.value, &arm_env, expected);
                 }
                 expected.clone()
@@ -396,7 +397,8 @@ impl ModuleChecker<'_> {
                 let mut found = Type::Unknown;
                 for arm in arms {
                     let mut arm_env = env.clone();
-                    self.bind_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env);
+                    let mut bound_names = BTreeSet::new();
+                    self.check_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env, &mut bound_names);
                     let arm_ty = self.infer_expr(&arm.value, &arm_env);
                     if matches!(found, Type::Unknown) {
                         found = arm_ty;
@@ -492,20 +494,33 @@ impl ModuleChecker<'_> {
         }
     }
 
-    fn bind_pattern(
+    fn check_pattern(
         &mut self,
         pattern: &Pattern,
         expected: &Type,
         env: &mut BTreeMap<String, Type>,
+        bound_names: &mut BTreeSet<String>,
     ) {
         match pattern {
             Pattern::Name(name) => {
-                self.add_typed_span(name.span, TypedSpanKind::Pattern, &name.text, expected);
-                env.insert(name.text.clone(), expected.clone());
+                self.bind_pattern_name(name, expected, env, bound_names);
+            }
+            Pattern::Wildcard { .. } => {}
+            Pattern::Int { span, .. } => {
+                self.check_pattern_type(*span, &Type::Int, expected);
+            }
+            Pattern::Text { span, .. } => {
+                self.check_pattern_type(*span, &Type::Text, expected);
+            }
+            Pattern::Bool { span, .. } => {
+                self.check_pattern_type(*span, &Type::Bool, expected);
+            }
+            Pattern::Unit { span } => {
+                self.check_pattern_type(*span, &Type::Unit, expected);
             }
             Pattern::Constructor { name, args, span } => {
                 let expected_variant = self.expand_alias(expected);
-                if let Type::Variant(cases) = expected_variant {
+                if let Type::Variant(cases) = &expected_variant {
                     if let Some((_, payload)) =
                         cases.iter().find(|(case_name, _)| case_name == &name.text)
                     {
@@ -520,8 +535,8 @@ impl ModuleChecker<'_> {
                                 ),
                             ));
                         }
-                        for (arg, expected) in args.iter().zip(payload) {
-                            self.bind_pattern(arg, expected, env);
+                        for (arg, payload_ty) in args.iter().zip(payload) {
+                            self.check_pattern(arg, payload_ty, env, bound_names);
                         }
                     } else {
                         self.diagnostics.push(Diagnostic::new(
@@ -529,40 +544,102 @@ impl ModuleChecker<'_> {
                             format!("constructor `{}` is not part of `{expected}`", name.text),
                         ));
                         for arg in args {
-                            self.bind_pattern(arg, &Type::Unknown, env);
+                            self.check_pattern(arg, &Type::Unknown, env, bound_names);
                         }
+                    }
+                } else if !matches!(expected_variant, Type::Unknown) {
+                    self.diagnostics.push(Diagnostic::new(
+                        name.span,
+                        format!("variant pattern requires a variant, found `{expected}`"),
+                    ));
+                    for arg in args {
+                        self.check_pattern(arg, &Type::Unknown, env, bound_names);
                     }
                 } else {
                     self.constructor_type(&name.text, args.len(), *span);
                     for arg in args {
-                        self.bind_pattern(arg, &Type::Unknown, env);
+                        self.check_pattern(arg, &Type::Unknown, env, bound_names);
                     }
                 }
             }
-            Pattern::List { items, .. } => {
-                let item_ty = match expected {
+            Pattern::List { items, rest, .. } => {
+                let expanded = self.expand_alias(expected);
+                let item_ty = match &expanded {
                     Type::List(item) => item.as_ref().clone(),
-                    _ => Type::Unknown,
+                    Type::Unknown => Type::Unknown,
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.span(),
+                            format!("list pattern requires a list, found `{expected}`"),
+                        ));
+                        Type::Unknown
+                    }
                 };
                 for item in items {
-                    self.bind_pattern(item, &item_ty, env);
+                    self.check_pattern(item, &item_ty, env, bound_names);
                 }
-                if let Pattern::List {
-                    rest: Some(rest), ..
-                } = pattern
-                {
+                if let Some(rest) = rest {
                     let rest_ty = Type::List(Box::new(item_ty));
-                    self.add_typed_span(rest.span, TypedSpanKind::Pattern, &rest.text, &rest_ty);
-                    env.insert(rest.text.clone(), rest_ty);
+                    self.bind_pattern_name(rest, &rest_ty, env, bound_names);
                 }
             }
-            Pattern::Record { .. }
-            | Pattern::Wildcard { .. }
-            | Pattern::Int { .. }
-            | Pattern::Text { .. }
-            | Pattern::Bool { .. }
-            | Pattern::Unit { .. }
-            | Pattern::Error { .. } => {}
+            Pattern::Record { fields, .. } => {
+                let expanded = self.expand_alias(expected);
+                let Type::Record(record_fields) = &expanded else {
+                    if !matches!(expanded, Type::Unknown) {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.span(),
+                            format!("record pattern requires a record, found `{expected}`"),
+                        ));
+                    }
+                    for field in fields {
+                        self.bind_pattern_name(field, &Type::Unknown, env, bound_names);
+                    }
+                    return;
+                };
+
+                for field in fields {
+                    if let Some((_, field_ty)) = record_fields
+                        .iter()
+                        .find(|(field_name, _)| field_name == &field.text)
+                    {
+                        self.bind_pattern_name(field, field_ty, env, bound_names);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            field.span,
+                            format!("unknown record field `{}`", field.text),
+                        ));
+                        self.bind_pattern_name(field, &Type::Unknown, env, bound_names);
+                    }
+                }
+            }
+            Pattern::Error { .. } => {}
+        }
+    }
+
+    fn bind_pattern_name(
+        &mut self,
+        name: &Name,
+        ty: &Type,
+        env: &mut BTreeMap<String, Type>,
+        bound_names: &mut BTreeSet<String>,
+    ) {
+        if !bound_names.insert(name.text.clone()) {
+            self.diagnostics.push(Diagnostic::new(
+                name.span,
+                format!("duplicate pattern binding `{}`", name.text),
+            ));
+        }
+        self.add_typed_span(name.span, TypedSpanKind::Pattern, &name.text, ty);
+        env.insert(name.text.clone(), ty.clone());
+    }
+
+    fn check_pattern_type(&mut self, span: Span, found: &Type, expected: &Type) {
+        if !self.compatible(found, expected) {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("pattern expects `{expected}`, found `{found}`"),
+            ));
         }
     }
 

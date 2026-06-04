@@ -165,3 +165,15 @@ evidence that produced them.
   parameters can be added later without changing the basic arrow syntax.
 - Revisit when: Pattern lambda parameters, inferred lambda parameter types, or
   richer block parsing around closing delimiters are implemented.
+
+- Decision: Check Phase 1 match patterns from the inferred scrutinee type.
+- Context: Pattern checking now validates literals, variables, lists with
+  `...rest`, closed record shorthand patterns, and closed variant constructor
+  patterns. Pattern-bound names receive checker typed spans for hover and
+  remain scoped to the match arm body.
+- Applies to phase(s): Phase 1.
+- Future implication: Record patterns are closed shorthand binders for now;
+  they do not introduce row-polymorphic destructuring or named-field nested
+  pattern syntax.
+- Revisit when: Exhaustiveness/redundancy checking, row-polymorphic patterns,
+  tuple patterns, or pattern lambda parameters are implemented.

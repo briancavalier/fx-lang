@@ -66,6 +66,20 @@ fn checker_runs_on_phase_1_lambda_fixture() {
 }
 
 #[test]
+fn checker_runs_on_phase_1_patterns_fixture() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-1"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-1/patterns.fx"),
+            source: include_str!("../../../examples/phase-1/patterns.fx").to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
 fn reports_duplicate_definitions() {
     let graph = index_workspace(
         &PathBuf::from("examples/phase-1"),
@@ -461,6 +475,149 @@ bad(result: Result) : Int
 }
 
 #[test]
+fn checks_record_patterns_and_literal_patterns() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Todo = {
+  title: Text,
+  done: Bool
+}
+
+label(todo: Todo) : Text
+  match todo
+    { title, done } ->
+      if done then title else "open"
+
+bool-label(value: Bool) : Text
+  match value
+    true ->
+      "yes"
+
+    false ->
+      "no"
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_literal_pattern_type_mismatches() {
+    let result = check_single(
+        "patterns.fx",
+        r#"bad(value: Bool) : Text
+  match value
+    1 ->
+      "one"
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("pattern expects `Bool`, found `Int`")
+    }));
+}
+
+#[test]
+fn reports_list_patterns_on_non_lists() {
+    let result = check_single(
+        "patterns.fx",
+        r#"bad(value: Int) : Int
+  match value
+    [first, ...rest] ->
+      first
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("list pattern requires a list"))
+    );
+}
+
+#[test]
+fn reports_record_patterns_on_non_records() {
+    let result = check_single(
+        "patterns.fx",
+        r#"bad(value: Int) : Int
+  match value
+    { id } ->
+      id
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("record pattern requires a record")
+    }));
+}
+
+#[test]
+fn reports_unknown_record_pattern_fields() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Todo = { id: Int }
+
+bad(todo: Todo) : Int
+  match todo
+    { done } ->
+      done
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown record field `done`"))
+    );
+}
+
+#[test]
+fn reports_variant_patterns_on_non_variants() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Result = < Ok(Int) >
+
+bad(value: Int) : Int
+  match value
+    Ok(found) ->
+      found
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("variant pattern requires a variant")
+    }));
+}
+
+#[test]
+fn reports_duplicate_pattern_bindings() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Pair = < MkPair(Int, Int) >
+
+bad(pair: Pair) : Int
+  match pair
+    MkPair(value, value) ->
+      value
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate pattern binding `value`")
+    }));
+}
+
+#[test]
 fn reports_match_arm_result_mismatches() {
     let result = check_single(
         "variant.fx",
@@ -571,6 +728,59 @@ mark-done(todo: Todo) : Todo
 }
 
 #[test]
+fn hovers_record_pattern_fields() {
+    let source_text = r#"type Todo = {
+  title: Text,
+  done: Bool
+}
+
+label(todo: Todo) : Text
+  match todo
+    { title, done } ->
+      if done then title else "open"
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "title,"))
+            .expect("title hover")
+            .contents,
+        "title : Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "done }"))
+            .expect("done hover")
+            .contents,
+        "done : Bool"
+    );
+}
+
+#[test]
+fn hovers_variant_pattern_payloads() {
+    let source_text = r#"type Result = < Ok(Int), Missing() >
+
+label(result: Result) : Int
+  match result
+    Ok(value) ->
+      value
+
+    Missing() ->
+      0
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "value)"))
+            .expect("payload hover")
+            .contents,
+        "value : Int"
+    );
+}
+
+#[test]
 fn hovers_lambda_parameters() {
     let source_text = r#"apply(f: Int -> Int, value: Int) : Int
   f(value)
@@ -658,6 +868,23 @@ main(todos: List Todo) : Int
         .definition_at("main", offset_of(source_text, "first.id"))
         .expect("first definition");
     assert_eq!(first_def.span.start, offset_of(source_text, "first,"));
+}
+
+#[test]
+fn definition_finds_record_pattern_binding_targets() {
+    let source_text = r#"type Todo = { title: Text }
+
+main(todo: Todo) : Text
+  match todo
+    { title } ->
+      title
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let title_def = analysis
+        .definition_at("main", offset_of(source_text, "title\n"))
+        .expect("title definition");
+    assert_eq!(title_def.span.start, offset_of(source_text, "title }"));
 }
 
 #[test]

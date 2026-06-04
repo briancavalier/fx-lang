@@ -1,4 +1,4 @@
-use fx_syntax::ast::{Expr, Item, TypeExpr};
+use fx_syntax::ast::{Expr, Item, Pattern, TypeExpr};
 use fx_syntax::parse_file;
 
 #[test]
@@ -64,6 +64,46 @@ fn parses_match_with_list_rest_pattern() {
         panic!("expected value");
     };
     assert!(matches!(value.body.result.as_ref(), Expr::Match { .. }));
+}
+
+#[test]
+fn parses_phase_1_pattern_shapes() {
+    let parsed = parse_file(
+        r#"type Todo = { title: Text, done: Bool }
+type Result = < Ok(Todo), Missing(Int) >
+
+label(result: Result) : Text
+  match result
+    Ok({ title, done }) ->
+      title
+
+    Missing(0) ->
+      "zero"
+
+    Missing(unit) ->
+      "unit"
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[2] else {
+        panic!("expected value");
+    };
+    let Expr::Match { arms, .. } = value.body.result.as_ref() else {
+        panic!("expected match");
+    };
+    assert!(matches!(
+        &arms[0].pattern,
+        Pattern::Constructor { args, .. } if matches!(args.first(), Some(Pattern::Record { .. }))
+    ));
+    assert!(matches!(
+        &arms[1].pattern,
+        Pattern::Constructor { args, .. } if matches!(args.first(), Some(Pattern::Int { .. }))
+    ));
+    assert!(matches!(
+        &arms[2].pattern,
+        Pattern::Constructor { args, .. } if matches!(args.first(), Some(Pattern::Unit { .. }))
+    ));
 }
 
 #[test]
