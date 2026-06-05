@@ -27,10 +27,33 @@ pub enum Type {
     List(Box<Type>),
     Named { name: String, args: Vec<Type> },
     Var(String),
-    Record(Vec<(String, Type)>),
-    Variant(Vec<(String, Vec<Type>)>),
+    Row(RowType),
     Function(Vec<Type>, Box<Type>),
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowType {
+    pub kind: RowKind,
+    pub entries: Vec<RowEntry>,
+    pub tail: Option<RowTailType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowKind {
+    Record,
+    Variant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowEntry {
+    Field { name: String, ty: Type },
+    Case { name: String, payload: Vec<Type> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowTailType {
+    Var(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +134,75 @@ struct ModuleChecker<'a> {
     constructor_arities: &'a BTreeMap<String, usize>,
     symbol_tables: &'a SymbolTables,
     typed_spans: Vec<TypedSpan>,
+}
+
+impl Type {
+    fn closed_record(fields: Vec<(String, Type)>) -> Self {
+        Type::Row(RowType {
+            kind: RowKind::Record,
+            entries: fields
+                .into_iter()
+                .map(|(name, ty)| RowEntry::Field { name, ty })
+                .collect(),
+            tail: None,
+        })
+    }
+
+    fn closed_variant(cases: Vec<(String, Vec<Type>)>) -> Self {
+        Type::Row(RowType {
+            kind: RowKind::Variant,
+            entries: cases
+                .into_iter()
+                .map(|(name, payload)| RowEntry::Case { name, payload })
+                .collect(),
+            tail: None,
+        })
+    }
+
+    fn as_closed_record(&self) -> Option<&RowType> {
+        match self {
+            Type::Row(row) if row.kind == RowKind::Record && row.tail.is_none() => Some(row),
+            _ => None,
+        }
+    }
+
+    fn as_closed_variant(&self) -> Option<&RowType> {
+        match self {
+            Type::Row(row) if row.kind == RowKind::Variant && row.tail.is_none() => Some(row),
+            _ => None,
+        }
+    }
+}
+
+impl RowType {
+    fn field(&self, wanted: &str) -> Option<&Type> {
+        if self.kind != RowKind::Record {
+            return None;
+        }
+        self.entries.iter().find_map(|entry| match entry {
+            RowEntry::Field { name, ty } if name == wanted => Some(ty),
+            _ => None,
+        })
+    }
+
+    fn field_index(&self, wanted: &str) -> Option<usize> {
+        if self.kind != RowKind::Record {
+            return None;
+        }
+        self.entries
+            .iter()
+            .position(|entry| matches!(entry, RowEntry::Field { name, .. } if name == wanted))
+    }
+
+    fn case(&self, wanted: &str) -> Option<&[Type]> {
+        if self.kind != RowKind::Variant {
+            return None;
+        }
+        self.entries.iter().find_map(|entry| match entry {
+            RowEntry::Case { name, payload } if name == wanted => Some(payload.as_slice()),
+            _ => None,
+        })
+    }
 }
 
 impl ModuleChecker<'_> {
@@ -297,7 +389,7 @@ impl ModuleChecker<'_> {
                 }
                 Type::List(Box::new(elem))
             }
-            Expr::Record { fields, .. } => Type::Record(
+            Expr::Record { fields, .. } => Type::closed_record(
                 fields
                     .iter()
                     .map(|field| (field.name.text.clone(), self.infer_expr(&field.value, env)))
@@ -314,9 +406,9 @@ impl ModuleChecker<'_> {
             Expr::Field { target, field, .. } => {
                 let target_ty = self.infer_expr(target, env);
                 match self.expand_alias(&target_ty) {
-                    Type::Record(fields) => fields
-                        .iter()
-                        .find_map(|(name, ty)| (name == &field.text).then_some(ty.clone()))
+                    Type::Row(row) if row.kind == RowKind::Record => row
+                        .field(&field.text)
+                        .cloned()
                         .inspect(|ty| {
                             self.add_typed_span(field.span, TypedSpanKind::Field, &field.text, ty);
                         })
@@ -477,7 +569,7 @@ impl ModuleChecker<'_> {
     ) -> Type {
         let base_ty = self.infer_expr(base, env);
         let expanded = self.expand_alias(&base_ty);
-        let Type::Record(mut fields) = expanded else {
+        let Type::Row(mut row) = expanded else {
             if !matches!(expanded, Type::Unknown) {
                 self.diagnostics.push(Diagnostic::new(
                     base.span(),
@@ -489,13 +581,23 @@ impl ModuleChecker<'_> {
             }
             return Type::Unknown;
         };
+        if row.kind != RowKind::Record || row.tail.is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                base.span(),
+                format!("record update requires a record, found `{base_ty}`"),
+            ));
+            for update in updates {
+                self.infer_expr(&update.value, env);
+            }
+            return Type::Unknown;
+        }
 
         for update in updates {
-            if let Some(index) = fields
-                .iter()
-                .position(|(name, _)| name == &update.name.text)
-            {
-                let expected = fields[index].1.clone();
+            if let Some(index) = row.field_index(&update.name.text) {
+                let expected = match &row.entries[index] {
+                    RowEntry::Field { ty, .. } => ty.clone(),
+                    RowEntry::Case { .. } => Type::Unknown,
+                };
                 let value_ty = self.check_expr(&update.value, env, &expected);
                 self.add_typed_span(
                     update.name.span,
@@ -503,7 +605,10 @@ impl ModuleChecker<'_> {
                     &update.name.text,
                     &expected,
                 );
-                fields[index].1 = value_ty;
+                row.entries[index] = RowEntry::Field {
+                    name: update.name.text.clone(),
+                    ty: value_ty,
+                };
             } else {
                 self.diagnostics.push(Diagnostic::new(
                     update.name.span,
@@ -513,7 +618,7 @@ impl ModuleChecker<'_> {
         }
 
         match base_ty {
-            Type::Record(_) => Type::Record(fields),
+            Type::Row(_) => Type::Row(row),
             Type::Named { .. } => base_ty,
             _ => Type::Unknown,
         }
@@ -545,10 +650,8 @@ impl ModuleChecker<'_> {
             }
             Pattern::Constructor { name, args, span } => {
                 let expected_variant = self.expand_alias(expected);
-                if let Type::Variant(cases) = &expected_variant {
-                    if let Some((_, payload)) =
-                        cases.iter().find(|(case_name, _)| case_name == &name.text)
-                    {
+                if let Some(row) = expected_variant.as_closed_variant() {
+                    if let Some(payload) = row.case(&name.text) {
                         if payload.len() != args.len() {
                             self.diagnostics.push(Diagnostic::new(
                                 *span,
@@ -610,7 +713,7 @@ impl ModuleChecker<'_> {
             }
             Pattern::Record { fields, .. } => {
                 let expanded = self.expand_alias(expected);
-                let Type::Record(record_fields) = &expanded else {
+                let Some(record_row) = expanded.as_closed_record() else {
                     if !matches!(expanded, Type::Unknown) {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.span(),
@@ -624,10 +727,7 @@ impl ModuleChecker<'_> {
                 };
 
                 for field in fields {
-                    if let Some((_, field_ty)) = record_fields
-                        .iter()
-                        .find(|(field_name, _)| field_name == &field.text)
-                    {
+                    if let Some(field_ty) = record_row.field(&field.text) {
                         self.bind_pattern_name(field, field_ty, env, bound_names);
                     } else {
                         self.diagnostics.push(Diagnostic::new(
@@ -959,13 +1059,13 @@ fn lower_type(ty: &TypeExpr) -> Type {
             params.iter().map(lower_type).collect(),
             Box::new(lower_type(result)),
         ),
-        TypeExpr::Record { fields, .. } => Type::Record(
+        TypeExpr::Record { fields, .. } => Type::closed_record(
             fields
                 .iter()
                 .map(|field| (field.name.text.clone(), lower_type(&field.value)))
                 .collect(),
         ),
-        TypeExpr::Variant { cases, .. } => Type::Variant(
+        TypeExpr::Variant { cases, .. } => Type::closed_variant(
             cases
                 .iter()
                 .map(|case| {
@@ -1005,34 +1105,45 @@ fn compatible(found: &Type, expected: &Type) -> bool {
         (Type::Named { name: a, args: aa }, Type::Named { name: b, args: ba }) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(a, b)| compatible(a, b))
         }
-        (Type::Record(a), Type::Record(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(name, ty)| {
-                    b.iter()
-                        .find_map(|(b_name, b_ty)| (b_name == name).then_some(b_ty))
-                        .is_some_and(|b_ty| compatible(ty, b_ty))
-                })
-        }
-        (Type::Variant(a), Type::Variant(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(name, payload)| {
-                    b.iter()
-                        .find_map(|(b_name, b_payload)| (b_name == name).then_some(b_payload))
-                        .is_some_and(|b_payload| {
-                            payload.len() == b_payload.len()
-                                && payload
-                                    .iter()
-                                    .zip(b_payload)
-                                    .all(|(ty, b_ty)| compatible(ty, b_ty))
-                        })
-                })
-        }
+        (Type::Row(a), Type::Row(b)) => compatible_rows(a, b),
         (Type::Function(a_params, a_result), Type::Function(b_params, b_result)) => {
             a_params.len() == b_params.len()
                 && a_params.iter().zip(b_params).all(|(a, b)| compatible(a, b))
                 && compatible(a_result, b_result)
         }
         _ => false,
+    }
+}
+
+fn compatible_rows(found: &RowType, expected: &RowType) -> bool {
+    if found.kind != expected.kind || found.tail.is_some() || expected.tail.is_some() {
+        return false;
+    }
+    if found.entries.len() != expected.entries.len() {
+        return false;
+    }
+
+    match found.kind {
+        RowKind::Record => found.entries.iter().all(|entry| {
+            let RowEntry::Field { name, ty } = entry else {
+                return false;
+            };
+            expected
+                .field(name)
+                .is_some_and(|expected_ty| compatible(ty, expected_ty))
+        }),
+        RowKind::Variant => found.entries.iter().all(|entry| {
+            let RowEntry::Case { name, payload } = entry else {
+                return false;
+            };
+            expected.case(name).is_some_and(|expected_payload| {
+                payload.len() == expected_payload.len()
+                    && payload
+                        .iter()
+                        .zip(expected_payload)
+                        .all(|(ty, expected_ty)| compatible(ty, expected_ty))
+            })
+        }),
     }
 }
 
@@ -1058,30 +1169,11 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) 
                 }
             }
         }
-        Type::Record(fields) => {
-            if let Type::Record(found_fields) = found {
-                for (name, ty) in fields {
-                    if let Some((_, found_ty)) = found_fields
-                        .iter()
-                        .find(|(found_name, _)| found_name == name)
-                    {
-                        unify_vars(ty, found_ty, subst);
-                    }
-                }
-            }
-        }
-        Type::Variant(cases) => {
-            if let Type::Variant(found_cases) = found {
-                for (name, payload) in cases {
-                    if let Some((_, found_payload)) = found_cases
-                        .iter()
-                        .find(|(found_name, _)| found_name == name)
-                    {
-                        for (ty, found_ty) in payload.iter().zip(found_payload) {
-                            unify_vars(ty, found_ty, subst);
-                        }
-                    }
-                }
+        Type::Row(row) => {
+            if let Type::Row(found_row) = found
+                && row.kind == found_row.kind
+            {
+                unify_row_vars(row, found_row, subst);
             }
         }
         Type::Function(params, result) => {
@@ -1096,6 +1188,33 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) 
     }
 }
 
+fn unify_row_vars(pattern: &RowType, found: &RowType, subst: &mut BTreeMap<String, Type>) {
+    match pattern.kind {
+        RowKind::Record => {
+            for entry in &pattern.entries {
+                let RowEntry::Field { name, ty } = entry else {
+                    continue;
+                };
+                if let Some(found_ty) = found.field(name) {
+                    unify_vars(ty, found_ty, subst);
+                }
+            }
+        }
+        RowKind::Variant => {
+            for entry in &pattern.entries {
+                let RowEntry::Case { name, payload } = entry else {
+                    continue;
+                };
+                if let Some(found_payload) = found.case(name) {
+                    for (ty, found_ty) in payload.iter().zip(found_payload) {
+                        unify_vars(ty, found_ty, subst);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
     match ty {
         Type::Var(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
@@ -1104,23 +1223,7 @@ fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
             name: name.clone(),
             args: args.iter().map(|arg| substitute(arg, subst)).collect(),
         },
-        Type::Record(fields) => Type::Record(
-            fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), substitute(ty, subst)))
-                .collect(),
-        ),
-        Type::Variant(cases) => Type::Variant(
-            cases
-                .iter()
-                .map(|(name, payload)| {
-                    (
-                        name.clone(),
-                        payload.iter().map(|ty| substitute(ty, subst)).collect(),
-                    )
-                })
-                .collect(),
-        ),
+        Type::Row(row) => Type::Row(substitute_row(row, subst)),
         Type::Function(params, result) => Type::Function(
             params
                 .iter()
@@ -1129,6 +1232,27 @@ fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
             Box::new(substitute(result, subst)),
         ),
         Type::Unit | Type::Bool | Type::Int | Type::Text | Type::Unknown => ty.clone(),
+    }
+}
+
+fn substitute_row(row: &RowType, subst: &BTreeMap<String, Type>) -> RowType {
+    RowType {
+        kind: row.kind,
+        entries: row
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                RowEntry::Field { name, ty } => RowEntry::Field {
+                    name: name.clone(),
+                    ty: substitute(ty, subst),
+                },
+                RowEntry::Case { name, payload } => RowEntry::Case {
+                    name: name.clone(),
+                    payload: payload.iter().map(|ty| substitute(ty, subst)).collect(),
+                },
+            })
+            .collect(),
+        tail: row.tail.clone(),
     }
 }
 
@@ -1148,33 +1272,7 @@ impl std::fmt::Display for Type {
                 Ok(())
             }
             Type::Var(name) => write!(f, "{name}"),
-            Type::Record(fields) => {
-                write!(f, "{{ ")?;
-                for (i, (name, ty)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{name}: {ty}")?;
-                }
-                write!(f, " }}")
-            }
-            Type::Variant(cases) => {
-                write!(f, "< ")?;
-                for (i, (name, payload)) in cases.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{name}(")?;
-                    for (j, ty) in payload.iter().enumerate() {
-                        if j > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{ty}")?;
-                    }
-                    write!(f, ")")?;
-                }
-                write!(f, " >")
-            }
+            Type::Row(row) => write!(f, "{row}"),
             Type::Function(params, result) => {
                 write!(f, "(")?;
                 for (i, param) in params.iter().enumerate() {
@@ -1186,6 +1284,62 @@ impl std::fmt::Display for Type {
                 write!(f, ") -> {result}")
             }
             Type::Unknown => write!(f, "<unknown>"),
+        }
+    }
+}
+
+impl std::fmt::Display for RowType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            RowKind::Record => {
+                write!(f, "{{ ")?;
+                let mut first = true;
+                for entry in &self.entries {
+                    let RowEntry::Field { name, ty } = entry else {
+                        continue;
+                    };
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{name}: {ty}")?;
+                }
+                if let Some(RowTailType::Var(name)) = &self.tail {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "...{name}")?;
+                }
+                write!(f, " }}")
+            }
+            RowKind::Variant => {
+                write!(f, "< ")?;
+                let mut first = true;
+                for entry in &self.entries {
+                    let RowEntry::Case { name, payload } = entry else {
+                        continue;
+                    };
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{name}(")?;
+                    for (j, ty) in payload.iter().enumerate() {
+                        if j > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{ty}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                if let Some(RowTailType::Var(name)) = &self.tail {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "...{name}")?;
+                }
+                write!(f, " >")
+            }
         }
     }
 }

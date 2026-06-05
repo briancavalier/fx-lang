@@ -269,6 +269,32 @@ mark-done(todo: Todo) : Todo
 }
 
 #[test]
+fn hovers_closed_record_and_variant_row_types_stably() {
+    let source_text = r#"make-record() : { id: Int, done: Bool }
+  { id: 1, done: false }
+
+accept-variant(result: < Ok(Int), Missing() >) : Int
+  0
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "make-record"))
+            .expect("record function hover")
+            .contents,
+        "make-record : () -> { id: Int, done: Bool }"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "accept-variant"))
+            .expect("variant function hover")
+            .contents,
+        "accept-variant : (< Ok(Int), Missing() >) -> Int"
+    );
+}
+
+#[test]
 fn checks_structural_record_updates() {
     let result = check_single(
         "record.fx",
@@ -651,6 +677,26 @@ fn reports_record_patterns_on_non_records() {
 }
 
 #[test]
+fn reports_record_patterns_on_variants() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Result = < Ok(Int) >
+
+bad(result: Result) : Int
+  match result
+    { id } ->
+      id
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("record pattern requires a record")
+    }));
+}
+
+#[test]
 fn reports_unknown_record_pattern_fields() {
     let result = check_single(
         "patterns.fx",
@@ -681,6 +727,27 @@ bad(value: Int) : Int
   match value
     Ok(found) ->
       found
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("variant pattern requires a variant")
+    }));
+}
+
+#[test]
+fn reports_variant_patterns_on_records() {
+    let result = check_single(
+        "patterns.fx",
+        r#"type Result = < Ok(Int) >
+type Todo = { id: Int }
+
+bad(todo: Todo) : Int
+  match todo
+    Ok(value) ->
+      value
 "#,
     );
 

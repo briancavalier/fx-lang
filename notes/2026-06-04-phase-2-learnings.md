@@ -54,3 +54,16 @@ evidence that produced them.
 - Future implication: Formatter and pretty-printer work should preserve the
   same delimiter style rather than special-casing row tails.
 - Revisit when: A formatter or syntax normalizer is implemented.
+
+- Decision: Use a shared internal row carrier for records and variants while
+  keeping row kinds distinct.
+- Context: `fx-core::check::Type` now represents records and variants as
+  `Type::Row(RowType)`, with `RowKind::Record` and `RowKind::Variant`
+  separating the two cases. Existing Phase 1 behavior still constructs closed
+  rows with no tail.
+- Applies to phase(s): Phase 2.
+- Future implication: Lowering, duplicate-label diagnostics, and row
+  unification can build on one row representation without allowing record rows
+  and variant rows to unify accidentally.
+- Revisit when: Parsed row tails are lowered into checker types and row
+  variables are scoped.
