@@ -26,7 +26,7 @@ pub enum Type {
     Text,
     List(Box<Type>),
     Named { name: String, args: Vec<Type> },
-    Var(String),
+    Var(TypeVar),
     Row(RowType),
     Function(Vec<Type>, Box<Type>),
     Unknown,
@@ -53,7 +53,19 @@ pub enum RowEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RowTailType {
-    Var(String),
+    Var(RowVar),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TypeVar {
+    name: String,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RowVar {
+    name: String,
+    scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,14 +90,14 @@ pub enum TypedSpanKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeDef {
-    params: Vec<String>,
+    params: Vec<TypeVar>,
     body: Type,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Substitution {
-    types: BTreeMap<String, Type>,
-    rows: BTreeMap<String, RowType>,
+    types: BTreeMap<TypeVar, Type>,
+    rows: BTreeMap<RowVar, RowType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +161,50 @@ struct ModuleChecker<'a> {
     constructor_arities: &'a BTreeMap<String, usize>,
     symbol_tables: &'a SymbolTables,
     typed_spans: Vec<TypedSpan>,
+}
+
+impl TypeVar {
+    pub(crate) fn unscoped(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            scope: None,
+        }
+    }
+
+    fn scoped(name: impl Into<String>, scope: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            scope: Some(scope.into()),
+        }
+    }
+}
+
+impl RowVar {
+    fn unscoped(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            scope: None,
+        }
+    }
+
+    fn scoped(name: impl Into<String>, scope: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            scope: Some(scope.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for TypeVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl std::fmt::Display for RowVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
 }
 
 impl Type {
@@ -237,8 +293,16 @@ impl ModuleChecker<'_> {
 
     fn check_value_decl(&mut self, decl: &ValueDecl) {
         let mut env = self.top_level.clone();
-        for param in &decl.params {
-            let ty = self.lower_type(&param.annotation);
+        let mut lowerer = TypeLowerer::for_value_decl(&self.module.name, decl);
+        let params = decl
+            .params
+            .iter()
+            .map(|param| lowerer.lower_type(&param.annotation))
+            .collect::<Vec<_>>();
+        let expected = lowerer.lower_type(&decl.annotation);
+        self.diagnostics.extend(lowerer.diagnostics);
+
+        for (param, ty) in decl.params.iter().zip(params) {
             self.add_typed_span(
                 param.name.span,
                 TypedSpanKind::Parameter,
@@ -247,7 +311,6 @@ impl ModuleChecker<'_> {
             );
             env.insert(param.name.text.clone(), ty);
         }
-        let expected = self.lower_type(&decl.annotation);
         self.check_block(&decl.body, &env, &expected);
     }
 
@@ -888,7 +951,7 @@ impl ModuleChecker<'_> {
                         args: decl
                             .params
                             .iter()
-                            .map(|param| Type::Var(param.text.clone()))
+                            .map(|param| Type::Var(TypeVar::unscoped(param.text.clone())))
                             .collect(),
                     };
                     self.add_typed_span(decl.name.span, TypedSpanKind::Type, &decl.name.text, &ty);
@@ -933,13 +996,6 @@ impl ModuleChecker<'_> {
             label: label.to_string(),
             display_type: ty.to_string(),
         });
-    }
-
-    fn lower_type(&mut self, ty: &TypeExpr) -> Type {
-        let mut lowerer = TypeLowerer::default();
-        let ty = lowerer.lower_type(ty);
-        self.diagnostics.extend(lowerer.diagnostics);
-        ty
     }
 }
 
@@ -1006,16 +1062,18 @@ fn collect_type_definitions(
     for module in graph.modules.values() {
         for item in &module.parsed.module.items {
             if let Item::Type(decl) = item {
-                let mut lowerer = TypeLowerer::default();
+                let mut lowerer = TypeLowerer::for_type_decl(&module.name, decl);
                 let body = lowerer.lower_type(&decl.body);
+                let params = decl
+                    .params
+                    .iter()
+                    .map(|param| lowerer.type_var(param))
+                    .collect();
                 diagnostics
                     .entry(module.name.clone())
                     .or_insert_with(Vec::new)
                     .extend(lowerer.diagnostics);
-                let def = TypeDef {
-                    params: decl.params.iter().map(|param| param.text.clone()).collect(),
-                    body,
-                };
+                let def = TypeDef { params, body };
                 defs.insert(decl.name.text.clone(), def.clone());
                 defs.insert(format!("{}.{}", module.name, decl.name.text), def);
             }
@@ -1030,6 +1088,7 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
         for item in &module.parsed.module.items {
             match item {
                 Item::Type(decl) => {
+                    let mut lowerer = TypeLowerer::for_type_decl(&module.name, decl);
                     types.insert(
                         format!("{}.{}", module.name, decl.name.text),
                         Type::Named {
@@ -1038,9 +1097,18 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                         },
                     );
                     if let TypeExpr::Variant { cases, .. } = &decl.body {
-                        let result = lower_named_type_app(&decl.name.text, &decl.params);
+                        let type_params = decl
+                            .params
+                            .iter()
+                            .map(|param| lowerer.type_var(param))
+                            .collect::<Vec<_>>();
+                        let result = lower_named_type_app(&decl.name.text, &type_params);
                         for case in cases {
-                            let params = case.payload.iter().map(lower_type).collect::<Vec<_>>();
+                            let params = case
+                                .payload
+                                .iter()
+                                .map(|payload| lowerer.lower_type(payload))
+                                .collect::<Vec<_>>();
                             types.insert(
                                 format!("{}.{}", module.name, case.name.text),
                                 Type::Function(params, Box::new(result.clone())),
@@ -1049,12 +1117,13 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                     }
                 }
                 Item::Value(decl) => {
+                    let mut lowerer = TypeLowerer::for_value_decl(&module.name, decl);
                     let params = decl
                         .params
                         .iter()
-                        .map(|param| lower_type(&param.annotation))
+                        .map(|param| lowerer.lower_type(&param.annotation))
                         .collect();
-                    let result = lower_type(&decl.annotation);
+                    let result = lowerer.lower_type(&decl.annotation);
                     types.insert(
                         format!("{}.{}", module.name, decl.name.text),
                         Type::Function(params, Box::new(result)),
@@ -1088,16 +1157,165 @@ fn collect_constructor_arities(graph: &ModuleGraph) -> BTreeMap<String, usize> {
     arities
 }
 
-fn lower_type(ty: &TypeExpr) -> Type {
-    TypeLowerer::default().lower_type(ty)
+#[derive(Clone, Default)]
+struct AnnotationScope {
+    owner: String,
+    type_vars: BTreeMap<String, TypeVar>,
+    row_vars: BTreeMap<String, RowVar>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl AnnotationScope {
+    fn for_value_decl(module: &str, decl: &ValueDecl) -> Self {
+        let owner = format!("value:{module}:{}", decl.name.text);
+        let mut type_spans = BTreeMap::new();
+        let mut row_spans = BTreeMap::new();
+        for param in &decl.params {
+            collect_annotation_vars(&param.annotation, &mut type_spans, &mut row_spans);
+        }
+        collect_annotation_vars(&decl.annotation, &mut type_spans, &mut row_spans);
+        Self::new(owner, type_spans, row_spans)
+    }
+
+    fn for_type_decl(module: &str, decl: &TypeDecl) -> Self {
+        let owner = format!("type:{module}:{}", decl.name.text);
+        let mut type_spans = decl
+            .params
+            .iter()
+            .map(|param| (param.text.clone(), param.span))
+            .collect::<BTreeMap<_, _>>();
+        let mut row_spans = BTreeMap::new();
+        collect_annotation_vars(&decl.body, &mut type_spans, &mut row_spans);
+        Self::new(owner, type_spans, row_spans)
+    }
+
+    fn new(
+        owner: String,
+        type_spans: BTreeMap<String, Span>,
+        row_spans: BTreeMap<String, Span>,
+    ) -> Self {
+        let type_vars = type_spans
+            .keys()
+            .map(|name| (name.clone(), TypeVar::scoped(name.clone(), owner.clone())))
+            .collect();
+        let row_vars = row_spans
+            .keys()
+            .map(|name| (name.clone(), RowVar::scoped(name.clone(), owner.clone())))
+            .collect();
+        let diagnostics = type_spans
+            .keys()
+            .filter_map(|name| {
+                row_spans.get(name).map(|span| {
+                    Diagnostic::new(
+                        *span,
+                        format!(
+                            "`{name}` cannot be used as both a type variable and a row variable"
+                        ),
+                    )
+                })
+            })
+            .collect();
+
+        Self {
+            owner,
+            type_vars,
+            row_vars,
+            diagnostics,
+        }
+    }
+
+    fn type_var(&self, name: &Name) -> TypeVar {
+        self.type_vars
+            .get(&name.text)
+            .cloned()
+            .unwrap_or_else(|| TypeVar::scoped(name.text.clone(), self.owner.clone()))
+    }
+
+    fn row_var(&self, tail: &RowTail) -> RowVar {
+        self.row_vars
+            .get(&tail.name.text)
+            .cloned()
+            .unwrap_or_else(|| RowVar::scoped(tail.name.text.clone(), self.owner.clone()))
+    }
+}
+
+fn collect_annotation_vars(
+    ty: &TypeExpr,
+    type_spans: &mut BTreeMap<String, Span>,
+    row_spans: &mut BTreeMap<String, Span>,
+) {
+    match ty {
+        TypeExpr::Var(name) => {
+            type_spans.entry(name.text.clone()).or_insert(name.span);
+        }
+        TypeExpr::App { callee, args, .. } => {
+            collect_annotation_vars(callee, type_spans, row_spans);
+            for arg in args {
+                collect_annotation_vars(arg, type_spans, row_spans);
+            }
+        }
+        TypeExpr::Function { params, result, .. } => {
+            for param in params {
+                collect_annotation_vars(param, type_spans, row_spans);
+            }
+            collect_annotation_vars(result, type_spans, row_spans);
+        }
+        TypeExpr::Record { fields, tail, .. } => {
+            for field in fields {
+                collect_annotation_vars(&field.value, type_spans, row_spans);
+            }
+            if let Some(tail) = tail {
+                row_spans
+                    .entry(tail.name.text.clone())
+                    .or_insert(tail.name.span);
+            }
+        }
+        TypeExpr::Variant { cases, tail, .. } => {
+            for case in cases {
+                for payload in &case.payload {
+                    collect_annotation_vars(payload, type_spans, row_spans);
+                }
+            }
+            if let Some(tail) = tail {
+                row_spans
+                    .entry(tail.name.text.clone())
+                    .or_insert(tail.name.span);
+            }
+        }
+        TypeExpr::Named { .. } | TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => {}
+    }
 }
 
 #[derive(Default)]
 struct TypeLowerer {
     diagnostics: Vec<Diagnostic>,
+    scope: Option<AnnotationScope>,
 }
 
 impl TypeLowerer {
+    fn for_value_decl(module: &str, decl: &ValueDecl) -> Self {
+        let scope = AnnotationScope::for_value_decl(module, decl);
+        Self {
+            diagnostics: scope.diagnostics.clone(),
+            scope: Some(scope),
+        }
+    }
+
+    fn for_type_decl(module: &str, decl: &TypeDecl) -> Self {
+        let scope = AnnotationScope::for_type_decl(module, decl);
+        Self {
+            diagnostics: scope.diagnostics.clone(),
+            scope: Some(scope),
+        }
+    }
+
+    fn type_var(&self, name: &Name) -> TypeVar {
+        self.scope
+            .as_ref()
+            .map(|scope| scope.type_var(name))
+            .unwrap_or_else(|| TypeVar::unscoped(name.text.clone()))
+    }
+
     fn lower_type(&mut self, ty: &TypeExpr) -> Type {
         match ty {
             TypeExpr::Named { path, .. } => match path
@@ -1116,7 +1334,12 @@ impl TypeLowerer {
                     args: Vec::new(),
                 },
             },
-            TypeExpr::Var(name) => Type::Var(name.text.clone()),
+            TypeExpr::Var(name) => Type::Var(
+                self.scope
+                    .as_ref()
+                    .map(|scope| scope.type_var(name))
+                    .unwrap_or_else(|| TypeVar::unscoped(name.text.clone())),
+            ),
             TypeExpr::App { callee, args, .. } => {
                 let callee = self.lower_type(callee);
                 match callee {
@@ -1159,13 +1382,18 @@ impl TypeLowerer {
             .collect::<Vec<_>>();
 
         if let Some(tail) = tail {
+            let var = self
+                .scope
+                .as_ref()
+                .map(|scope| scope.row_var(tail))
+                .unwrap_or_else(|| RowVar::unscoped(tail.name.text.clone()));
             Type::Row(RowType {
                 kind: RowKind::Record,
                 entries: fields
                     .into_iter()
                     .map(|(name, ty)| RowEntry::Field { name, ty })
                     .collect(),
-                tail: Some(RowTailType::Var(tail.name.text.clone())),
+                tail: Some(RowTailType::Var(var)),
             })
         } else {
             Type::closed_record(fields)
@@ -1194,13 +1422,18 @@ impl TypeLowerer {
             .collect::<Vec<_>>();
 
         if let Some(tail) = tail {
+            let var = self
+                .scope
+                .as_ref()
+                .map(|scope| scope.row_var(tail))
+                .unwrap_or_else(|| RowVar::unscoped(tail.name.text.clone()));
             Type::Row(RowType {
                 kind: RowKind::Variant,
                 entries: cases
                     .into_iter()
                     .map(|(name, payload)| RowEntry::Case { name, payload })
                     .collect(),
-                tail: Some(RowTailType::Var(tail.name.text.clone())),
+                tail: Some(RowTailType::Var(var)),
             })
         } else {
             Type::closed_variant(cases)
@@ -1208,13 +1441,10 @@ impl TypeLowerer {
     }
 }
 
-fn lower_named_type_app(name: &str, params: &[Name]) -> Type {
+fn lower_named_type_app(name: &str, params: &[TypeVar]) -> Type {
     Type::Named {
         name: name.to_string(),
-        args: params
-            .iter()
-            .map(|param| Type::Var(param.text.clone()))
-            .collect(),
+        args: params.iter().cloned().map(Type::Var).collect(),
     }
 }
 
@@ -1391,7 +1621,7 @@ fn unify_variant_rows(
 }
 
 fn bind_row_tail(
-    name: &str,
+    name: &RowVar,
     row: RowType,
     subst: &mut Substitution,
 ) -> Result<(), CompatibilityError> {
@@ -1399,7 +1629,7 @@ fn bind_row_tail(
         let mut nested = subst.clone();
         unify_rows(&row, existing, &mut nested)?;
     } else {
-        subst.rows.insert(name.to_string(), row);
+        subst.rows.insert(name.clone(), row);
     }
     Ok(())
 }

@@ -488,6 +488,94 @@ main() : { name: Text, age: Int }
 }
 
 #[test]
+fn keeps_row_variables_declaration_local() {
+    let result = check_single(
+        "rows.fx",
+        r#"keep-person(person: { name: Text, ...r }) : { name: Text, ...r }
+  person
+
+keep-todo(todo: { title: Text, ...r }) : { title: Text, ...r }
+  todo
+
+main() : { title: Text, done: Bool }
+  keep-todo({ title: "Write tests", done: false })
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn keeps_type_and_row_variables_separate_across_declarations() {
+    let result = check_single(
+        "rows.fx",
+        r#"identity(value: a) : a
+  value
+
+name(row: { name: Text, ...a }) : Text
+  row.name
+
+main() : Text
+  name({ name: "Ada", age: 1 })
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn hovers_open_row_aliases_with_source_tail_names() {
+    let source_text = r#"type Open = { name: Text, ...r }
+
+same(value: Open) : Open
+  value
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "same"))
+            .expect("alias function hover")
+            .contents,
+        "same : (Open) -> Open"
+    );
+}
+
+#[test]
+fn reports_value_annotation_type_and_row_variable_name_conflicts() {
+    let result = check_single(
+        "rows.fx",
+        r#"bad(value: { field: r, ...r }) : r
+  value.field
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`r` cannot be used as both a type variable and a row variable")
+    }));
+}
+
+#[test]
+fn reports_alias_type_and_row_variable_name_conflicts() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Bad r = { field: r, ...r }
+
+value() : Int
+  1
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`r` cannot be used as both a type variable and a row variable")
+    }));
+}
+
+#[test]
 fn checks_structural_record_updates() {
     let result = check_single(
         "record.fx",

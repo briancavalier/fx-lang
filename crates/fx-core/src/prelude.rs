@@ -1,4 +1,4 @@
-use crate::check::Type;
+use crate::check::{Type, TypeVar};
 use fx_syntax::ast::BinaryOp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +46,7 @@ fn equality_operator(left: &Type, right: &Type) -> BinaryOperator {
         left.clone()
     };
     let display_operand = if matches!(operand, Type::Unknown) {
-        Type::Var("a".to_string())
+        Type::Var(TypeVar::unscoped("a"))
     } else {
         operand
     };

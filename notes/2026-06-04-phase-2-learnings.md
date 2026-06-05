@@ -111,3 +111,17 @@ evidence that produced them.
   slice, but later scoping work should avoid conflating type variables and row
   variables with the same textual name.
 - Revisit when: Row variable binders are represented explicitly.
+
+- Decision: Treat annotation row variables as implicit, declaration-local, and
+  kinded.
+- Context: Value annotations now collect ordinary type variables and row tail
+  variables across the whole declaration signature before lowering. Type aliases
+  do the same for declared type parameters plus implicit row tails in the alias
+  body. Internal variable identities are scoped and kind-specific, while display
+  still shows the source names such as `a` and `...r`.
+- Applies to phase(s): Phase 2.
+- Future implication: Later effect and context rows should reuse the same
+  kinded annotation-scope discipline rather than sharing raw variable names
+  across row kinds.
+- Revisit when: Value declarations gain explicit generic binders or row
+  variables need export-surface identity beyond one declaration.
