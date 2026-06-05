@@ -87,3 +87,27 @@ evidence that produced them.
   row validation remains attached to the same module-owned diagnostics path as
   other checker errors.
 - Revisit when: Duplicate labels need diagnostic codes or fix suggestions.
+
+- Decision: Use row unification for width-polymorphic compatibility while
+  keeping closed rows exact.
+- Context: Expected open records and variants now accept found rows that
+  contain the required members, and bind the expected row tail to the remaining
+  fields or cases. Closed rows still require an exact closed match, and record
+  rows and variant rows produce explicit row-kind mismatch diagnostics.
+- Applies to phase(s): Phase 2.
+- Future implication: Later row-variable scoping and generalization can build
+  on the same row-tail substitution path instead of adding a separate
+  compatibility mechanism.
+- Revisit when: Open rows need declaration-level scoping, generalized row
+  variables, or solving between two independent open row tails.
+
+- Decision: Keep ordinary type substitutions and row-tail substitutions in
+  separate maps.
+- Context: Function calls now substitute ordinary type variables from one map
+  and expand row-tail variables from a row map. Substituting a bound row tail
+  appends the remainder entries and preserves any found open tail.
+- Applies to phase(s): Phase 2.
+- Future implication: Row-variable names can remain plain strings for this
+  slice, but later scoping work should avoid conflating type variables and row
+  variables with the same textual name.
+- Revisit when: Row variable binders are represented explicitly.

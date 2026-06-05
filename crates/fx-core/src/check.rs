@@ -82,6 +82,19 @@ struct TypeDef {
     body: Type,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Substitution {
+    types: BTreeMap<String, Type>,
+    rows: BTreeMap<String, RowType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompatibilityError {
+    Mismatch,
+    TypeMismatch { expected: Type, found: Type },
+    RowKind { expected: RowKind, found: RowKind },
+}
+
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
@@ -310,10 +323,12 @@ impl ModuleChecker<'_> {
     ) -> Type {
         let found = self.infer_expr(expr, env);
         if !self.compatible(&found, expected) {
-            self.diagnostics.push(Diagnostic::new(
-                expr.span(),
+            let message = self.compatibility_message(
+                &found,
+                expected,
                 format!("expected `{expected}`, found `{found}`"),
-            ));
+            );
+            self.diagnostics.push(Diagnostic::new(expr.span(), message));
         }
         found
     }
@@ -383,10 +398,12 @@ impl ModuleChecker<'_> {
                 for item in items.iter().skip(1) {
                     let found = self.infer_expr(item, env);
                     if !self.compatible(&found, &elem) {
-                        self.diagnostics.push(Diagnostic::new(
-                            item.span(),
+                        let message = self.compatibility_message(
+                            &found,
+                            &elem,
                             format!("list item type mismatch: expected `{elem}`, found `{found}`"),
-                        ));
+                        );
+                        self.diagnostics.push(Diagnostic::new(item.span(), message));
                     }
                 }
                 Type::List(Box::new(elem))
@@ -443,7 +460,7 @@ impl ModuleChecker<'_> {
                             ),
                         ));
                     }
-                    let mut subst = BTreeMap::new();
+                    let mut subst = Substitution::default();
                     for (arg, expected) in args.iter().zip(params.iter()) {
                         let found = self.check_expr(arg, env, expected);
                         unify_vars(expected, &found, &mut subst);
@@ -477,10 +494,13 @@ impl ModuleChecker<'_> {
                 if self.compatible(&then_ty, &else_ty) {
                     then_ty
                 } else {
-                    self.diagnostics.push(Diagnostic::new(
-                        else_branch.span(),
+                    let message = self.compatibility_message(
+                        &then_ty,
+                        &else_ty,
                         format!("if branches differ: `{then_ty}` and `{else_ty}`"),
-                    ));
+                    );
+                    self.diagnostics
+                        .push(Diagnostic::new(else_branch.span(), message));
                     Type::Unknown
                 }
             }
@@ -498,12 +518,15 @@ impl ModuleChecker<'_> {
                     if matches!(found, Type::Unknown) {
                         found = arm_ty;
                     } else if !self.compatible(&found, &arm_ty) {
-                        self.diagnostics.push(Diagnostic::new(
-                            arm.value.span(),
+                        let message = self.compatibility_message(
+                            &arm_ty,
+                            &found,
                             format!(
                                 "match arm type mismatch: expected `{found}`, found `{arm_ty}`"
                             ),
-                        ));
+                        );
+                        self.diagnostics
+                            .push(Diagnostic::new(arm.value.span(), message));
                     }
                 }
                 found
@@ -540,10 +563,13 @@ impl ModuleChecker<'_> {
 
         if matches!(op, BinaryOp::Equal) {
             if !self.compatible(&left_ty, &right_ty) {
-                self.diagnostics.push(Diagnostic::new(
-                    right.span(),
+                let message = self.compatibility_message(
+                    &left_ty,
+                    &right_ty,
                     format!("cannot compare `{left_ty}` with `{right_ty}`"),
-                ));
+                );
+                self.diagnostics
+                    .push(Diagnostic::new(right.span(), message));
             }
             return operator.result;
         }
@@ -556,10 +582,12 @@ impl ModuleChecker<'_> {
 
     fn check_operator_operand(&mut self, label: &str, expr: &Expr, found: &Type, expected: &Type) {
         if !self.compatible(found, expected) {
-            self.diagnostics.push(Diagnostic::new(
-                expr.span(),
+            let message = self.compatibility_message(
+                found,
+                expected,
                 format!("`{label}` expects `{expected}` operands, found `{found}`"),
-            ));
+            );
+            self.diagnostics.push(Diagnostic::new(expr.span(), message));
         }
     }
 
@@ -763,10 +791,12 @@ impl ModuleChecker<'_> {
 
     fn check_pattern_type(&mut self, span: Span, found: &Type, expected: &Type) {
         if !self.compatible(found, expected) {
-            self.diagnostics.push(Diagnostic::new(
-                span,
+            let message = self.compatibility_message(
+                found,
+                expected,
                 format!("pattern expects `{expected}`, found `{found}`"),
-            ));
+            );
+            self.diagnostics.push(Diagnostic::new(span, message));
         }
     }
 
@@ -787,12 +817,16 @@ impl ModuleChecker<'_> {
                 .type_defs
                 .get(name)
                 .map(|def| {
-                    let subst = def
+                    let types = def
                         .params
                         .iter()
                         .cloned()
                         .zip(args.iter().cloned())
                         .collect::<BTreeMap<_, _>>();
+                    let subst = Substitution {
+                        types,
+                        rows: BTreeMap::new(),
+                    };
                     substitute(&def.body, &subst)
                 })
                 .unwrap_or_else(|| ty.clone()),
@@ -801,7 +835,23 @@ impl ModuleChecker<'_> {
     }
 
     fn compatible(&self, found: &Type, expected: &Type) -> bool {
-        compatible(&self.expand_alias(found), &self.expand_alias(expected))
+        compatible(&self.expand_alias(found), &self.expand_alias(expected)).is_ok()
+    }
+
+    fn compatibility_message(&self, found: &Type, expected: &Type, fallback: String) -> String {
+        match compatible(&self.expand_alias(found), &self.expand_alias(expected)) {
+            Err(CompatibilityError::RowKind { expected, found }) => {
+                format!(
+                    "expected {} row, found {} row",
+                    row_kind_name(expected),
+                    row_kind_name(found)
+                )
+            }
+            Err(CompatibilityError::TypeMismatch { expected, found }) => {
+                format!("expected `{expected}`, found `{found}`")
+            }
+            Err(CompatibilityError::Mismatch) | Ok(()) => fallback,
+        }
     }
 
     fn resolve_expr_name(&mut self, name: &str, span: Span, env: &BTreeMap<String, Type>) -> Type {
@@ -1168,67 +1218,206 @@ fn lower_named_type_app(name: &str, params: &[Name]) -> Type {
     }
 }
 
-fn compatible(found: &Type, expected: &Type) -> bool {
-    if found == expected
-        || matches!(found, Type::Unknown)
-        || matches!(expected, Type::Unknown)
-        || matches!(expected, Type::Var(_))
-        || matches!(found, Type::Var(_))
-    {
-        return true;
+fn compatible(found: &Type, expected: &Type) -> Result<(), CompatibilityError> {
+    let mut subst = Substitution::default();
+    unify_compatible(found, expected, &mut subst)
+}
+
+fn unify_compatible(
+    found: &Type,
+    expected: &Type,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    if found == expected || matches!(found, Type::Unknown) || matches!(expected, Type::Unknown) {
+        return Ok(());
     }
 
     match (found, expected) {
-        (Type::List(a), Type::List(b)) => compatible(a, b),
-        (Type::Named { name: a, args: aa }, Type::Named { name: b, args: ba }) => {
-            a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(a, b)| compatible(a, b))
+        (_, Type::Var(name)) => {
+            subst
+                .types
+                .entry(name.clone())
+                .or_insert_with(|| found.clone());
+            Ok(())
         }
-        (Type::Row(a), Type::Row(b)) => compatible_rows(a, b),
-        (Type::Function(a_params, a_result), Type::Function(b_params, b_result)) => {
-            a_params.len() == b_params.len()
-                && a_params.iter().zip(b_params).all(|(a, b)| compatible(a, b))
-                && compatible(a_result, b_result)
+        (Type::Var(name), _) => {
+            subst
+                .types
+                .entry(name.clone())
+                .or_insert_with(|| expected.clone());
+            Ok(())
         }
-        _ => false,
+        (Type::List(a), Type::List(b)) => unify_compatible(a, b, subst),
+        (Type::Named { name: a, args: aa }, Type::Named { name: b, args: ba })
+            if a == b && aa.len() == ba.len() =>
+        {
+            for (a, b) in aa.iter().zip(ba) {
+                unify_compatible(a, b, subst)?;
+            }
+            Ok(())
+        }
+        (Type::Row(a), Type::Row(b)) => unify_rows(a, b, subst),
+        (Type::Function(a_params, a_result), Type::Function(b_params, b_result))
+            if a_params.len() == b_params.len() =>
+        {
+            for (a, b) in a_params.iter().zip(b_params) {
+                unify_compatible(a, b, subst)?;
+            }
+            unify_compatible(a_result, b_result, subst)
+        }
+        _ => Err(CompatibilityError::Mismatch),
     }
 }
 
-fn compatible_rows(found: &RowType, expected: &RowType) -> bool {
-    if found.kind != expected.kind || found.tail.is_some() || expected.tail.is_some() {
-        return false;
-    }
-    if found.entries.len() != expected.entries.len() {
-        return false;
+fn unify_rows(
+    found: &RowType,
+    expected: &RowType,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    if found.kind != expected.kind {
+        return Err(CompatibilityError::RowKind {
+            expected: expected.kind,
+            found: found.kind,
+        });
     }
 
-    match found.kind {
-        RowKind::Record => found.entries.iter().all(|entry| {
-            let RowEntry::Field { name, ty } = entry else {
-                return false;
-            };
-            expected
-                .field(name)
-                .is_some_and(|expected_ty| compatible(ty, expected_ty))
-        }),
-        RowKind::Variant => found.entries.iter().all(|entry| {
-            let RowEntry::Case { name, payload } = entry else {
-                return false;
-            };
-            expected.case(name).is_some_and(|expected_payload| {
-                payload.len() == expected_payload.len()
-                    && payload
-                        .iter()
-                        .zip(expected_payload)
-                        .all(|(ty, expected_ty)| compatible(ty, expected_ty))
-            })
-        }),
+    let remainder = match expected.kind {
+        RowKind::Record => unify_record_rows(found, expected, subst)?,
+        RowKind::Variant => unify_variant_rows(found, expected, subst)?,
+    };
+
+    if let Some(RowTailType::Var(name)) = &expected.tail {
+        bind_row_tail(name, remainder, subst)
+    } else if found.tail.is_none() && remainder.entries.is_empty() {
+        Ok(())
+    } else {
+        Err(CompatibilityError::Mismatch)
     }
 }
 
-fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) {
+fn unify_record_rows(
+    found: &RowType,
+    expected: &RowType,
+    subst: &mut Substitution,
+) -> Result<RowType, CompatibilityError> {
+    let mut required = BTreeSet::new();
+    for entry in &expected.entries {
+        let RowEntry::Field { name, ty } = entry else {
+            return Err(CompatibilityError::Mismatch);
+        };
+        required.insert(name.clone());
+        let Some(found_ty) = found.field(name) else {
+            return Err(CompatibilityError::Mismatch);
+        };
+        unify_compatible(found_ty, ty, subst).map_err(|error| match error {
+            CompatibilityError::RowKind { .. } => error,
+            CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
+                CompatibilityError::TypeMismatch {
+                    expected: ty.clone(),
+                    found: found_ty.clone(),
+                }
+            }
+        })?;
+    }
+
+    let entries = found
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            RowEntry::Field { name, ty } if !required.contains(name) => Some(RowEntry::Field {
+                name: name.clone(),
+                ty: ty.clone(),
+            }),
+            RowEntry::Field { .. } => None,
+            RowEntry::Case { .. } => Some(entry.clone()),
+        })
+        .collect();
+
+    Ok(RowType {
+        kind: RowKind::Record,
+        entries,
+        tail: found.tail.clone(),
+    })
+}
+
+fn unify_variant_rows(
+    found: &RowType,
+    expected: &RowType,
+    subst: &mut Substitution,
+) -> Result<RowType, CompatibilityError> {
+    let mut required = BTreeSet::new();
+    for entry in &expected.entries {
+        let RowEntry::Case { name, payload } = entry else {
+            return Err(CompatibilityError::Mismatch);
+        };
+        required.insert(name.clone());
+        let Some(found_payload) = found.case(name) else {
+            return Err(CompatibilityError::Mismatch);
+        };
+        if payload.len() != found_payload.len() {
+            return Err(CompatibilityError::Mismatch);
+        }
+        for (found_ty, expected_ty) in found_payload.iter().zip(payload) {
+            unify_compatible(found_ty, expected_ty, subst).map_err(|error| match error {
+                CompatibilityError::RowKind { .. } => error,
+                CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
+                    CompatibilityError::TypeMismatch {
+                        expected: expected_ty.clone(),
+                        found: found_ty.clone(),
+                    }
+                }
+            })?;
+        }
+    }
+
+    let entries = found
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            RowEntry::Case { name, payload } if !required.contains(name) => Some(RowEntry::Case {
+                name: name.clone(),
+                payload: payload.clone(),
+            }),
+            RowEntry::Case { .. } => None,
+            RowEntry::Field { .. } => Some(entry.clone()),
+        })
+        .collect();
+
+    Ok(RowType {
+        kind: RowKind::Variant,
+        entries,
+        tail: found.tail.clone(),
+    })
+}
+
+fn bind_row_tail(
+    name: &str,
+    row: RowType,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    if let Some(existing) = subst.rows.get(name) {
+        let mut nested = subst.clone();
+        unify_rows(&row, existing, &mut nested)?;
+    } else {
+        subst.rows.insert(name.to_string(), row);
+    }
+    Ok(())
+}
+
+fn row_kind_name(kind: RowKind) -> &'static str {
+    match kind {
+        RowKind::Record => "record",
+        RowKind::Variant => "variant",
+    }
+}
+
+fn unify_vars(pattern: &Type, found: &Type, subst: &mut Substitution) {
     match pattern {
         Type::Var(name) => {
-            subst.entry(name.clone()).or_insert_with(|| found.clone());
+            subst
+                .types
+                .entry(name.clone())
+                .or_insert_with(|| found.clone());
         }
         Type::List(item) => {
             if let Type::List(found_item) = found {
@@ -1251,7 +1440,7 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) 
             if let Type::Row(found_row) = found
                 && row.kind == found_row.kind
             {
-                unify_row_vars(row, found_row, subst);
+                let _ = unify_rows(found_row, row, subst);
             }
         }
         Type::Function(params, result) => {
@@ -1266,36 +1455,9 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut BTreeMap<String, Type>) 
     }
 }
 
-fn unify_row_vars(pattern: &RowType, found: &RowType, subst: &mut BTreeMap<String, Type>) {
-    match pattern.kind {
-        RowKind::Record => {
-            for entry in &pattern.entries {
-                let RowEntry::Field { name, ty } = entry else {
-                    continue;
-                };
-                if let Some(found_ty) = found.field(name) {
-                    unify_vars(ty, found_ty, subst);
-                }
-            }
-        }
-        RowKind::Variant => {
-            for entry in &pattern.entries {
-                let RowEntry::Case { name, payload } = entry else {
-                    continue;
-                };
-                if let Some(found_payload) = found.case(name) {
-                    for (ty, found_ty) in payload.iter().zip(found_payload) {
-                        unify_vars(ty, found_ty, subst);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
+fn substitute(ty: &Type, subst: &Substitution) -> Type {
     match ty {
-        Type::Var(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Var(name) => subst.types.get(name).cloned().unwrap_or_else(|| ty.clone()),
         Type::List(item) => Type::List(Box::new(substitute(item, subst))),
         Type::Named { name, args } => Type::Named {
             name: name.clone(),
@@ -1313,24 +1475,43 @@ fn substitute(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
     }
 }
 
-fn substitute_row(row: &RowType, subst: &BTreeMap<String, Type>) -> RowType {
+fn substitute_row(row: &RowType, subst: &Substitution) -> RowType {
+    let mut entries = row
+        .entries
+        .iter()
+        .map(|entry| substitute_row_entry(entry, subst))
+        .collect::<Vec<_>>();
+
+    let tail = match &row.tail {
+        Some(RowTailType::Var(name)) => {
+            if let Some(bound) = subst.rows.get(name) {
+                let bound = substitute_row(bound, subst);
+                entries.extend(bound.entries);
+                bound.tail
+            } else {
+                row.tail.clone()
+            }
+        }
+        None => None,
+    };
+
     RowType {
         kind: row.kind,
-        entries: row
-            .entries
-            .iter()
-            .map(|entry| match entry {
-                RowEntry::Field { name, ty } => RowEntry::Field {
-                    name: name.clone(),
-                    ty: substitute(ty, subst),
-                },
-                RowEntry::Case { name, payload } => RowEntry::Case {
-                    name: name.clone(),
-                    payload: payload.iter().map(|ty| substitute(ty, subst)).collect(),
-                },
-            })
-            .collect(),
-        tail: row.tail.clone(),
+        entries,
+        tail,
+    }
+}
+
+fn substitute_row_entry(entry: &RowEntry, subst: &Substitution) -> RowEntry {
+    match entry {
+        RowEntry::Field { name, ty } => RowEntry::Field {
+            name: name.clone(),
+            ty: substitute(ty, subst),
+        },
+        RowEntry::Case { name, payload } => RowEntry::Case {
+            name: name.clone(),
+            payload: payload.iter().map(|ty| substitute(ty, subst)).collect(),
+        },
     }
 }
 

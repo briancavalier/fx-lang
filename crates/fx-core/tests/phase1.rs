@@ -321,6 +321,173 @@ message(result: < Ok(a), Error(Text), ...r >) : Text
 }
 
 #[test]
+fn checks_open_record_rows_accept_extra_fields() {
+    let result = check_single(
+        "rows.fx",
+        r#"greet(person: { name: Text, ...r }) : Text
+  person.name
+
+main() : Text
+  greet({ name: "Ada", age: 1 })
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_open_record_required_field_type_mismatches() {
+    let result = check_single(
+        "rows.fx",
+        r#"greet(person: { name: Text, ...r }) : Text
+  person.name
+
+bad() : Text
+  greet({ name: 1, age: 2 })
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Text`, found `Int`"))
+    );
+}
+
+#[test]
+fn reports_open_record_missing_required_fields() {
+    let result = check_single(
+        "rows.fx",
+        r#"greet(person: { name: Text, ...r }) : Text
+  person.name
+
+bad() : Text
+  greet({ age: 1 })
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `{ name: Text, ...r }`, found `{ age: Int }`")
+    }));
+}
+
+#[test]
+fn checks_open_variant_rows_accept_extra_cases() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+code(result: < Ok(Int), ...r >) : Int
+  0
+
+main(result: Result) : Int
+  code(result)
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_open_variant_required_case_payload_mismatches() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Result = < Ok(Text), Missing() >
+
+code(result: < Ok(Int), ...r >) : Int
+  0
+
+bad(result: Result) : Int
+  code(result)
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
+    );
+}
+
+#[test]
+fn reports_open_variant_missing_required_cases() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Result = < Missing() >
+
+code(result: < Ok(Int), ...r >) : Int
+  0
+
+bad(result: Result) : Int
+  code(result)
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `< Ok(Int), ...r >`, found `Result`")
+    }));
+}
+
+#[test]
+fn reports_record_expected_variant_found_row_kind_mismatches() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad(result: Result) : { name: Text, ...r }
+  result
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "expected record row, found variant row")
+    );
+}
+
+#[test]
+fn reports_variant_expected_record_found_row_kind_mismatches() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Person = { name: Text, age: Int }
+
+bad(person: Person) : < Ok(Int), ...r >
+  person
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "expected variant row, found record row")
+    );
+}
+
+#[test]
+fn substitutes_open_record_row_tails_through_function_calls() {
+    let result = check_single(
+        "rows.fx",
+        r#"keep(person: { name: Text, ...r }) : { name: Text, ...r }
+  person
+
+main() : { name: Text, age: Int }
+  keep({ name: "Ada", age: 1 })
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
 fn checks_structural_record_updates() {
     let result = check_single(
         "record.fx",
