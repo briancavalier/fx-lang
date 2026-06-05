@@ -125,3 +125,14 @@ evidence that produced them.
   across row kinds.
 - Revisit when: Value declarations gain explicit generic binders or row
   variables need export-surface identity beyond one declaration.
+
+- Decision: Open-record field access is limited to statically required fields.
+- Context: Field access now has explicit coverage for open record rows and
+  aliases such as `{ name: Text, ...r }`. Required fields produce normal field
+  hovers, while missing fields still report `unknown record field` at the field
+  access rather than being looked up through the row tail.
+- Applies to phase(s): Phase 2.
+- Future implication: Later open-record update work should use the same
+  required-field boundary unless it deliberately decides how row tails gain new
+  fields.
+- Revisit when: Row constraints or row-tail field insertion are designed.

@@ -1625,6 +1625,9 @@ fn bind_row_tail(
     row: RowType,
     subst: &mut Substitution,
 ) -> Result<(), CompatibilityError> {
+    if row.entries.is_empty() && matches!(&row.tail, Some(RowTailType::Var(tail)) if tail == name) {
+        return Ok(());
+    }
     if let Some(existing) = subst.rows.get(name) {
         let mut nested = subst.clone();
         unify_rows(&row, existing, &mut nested)?;

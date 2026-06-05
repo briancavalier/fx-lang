@@ -336,6 +336,68 @@ main() : Text
 }
 
 #[test]
+fn checks_open_record_alias_field_access() {
+    let result = check_single(
+        "rows.fx",
+        r#"type Person = { name: Text, ...r }
+
+greet(person: Person) : Text
+  person.name
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_open_record_field_access_through_locals() {
+    let result = check_single(
+        "rows.fx",
+        r#"keep(person: { name: Text, ...r }) : { name: Text, ...r }
+  person
+
+main() : Text
+  person =
+    keep({ name: "Ada", age: 1 })
+
+  person.name
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_open_record_field_access_in_contextual_lambdas() {
+    let result = check_single(
+        "rows.fx",
+        r#"apply(f: { name: Text, ...r } -> Text, person: { name: Text, ...r }) : Text
+  f(person)
+
+main() : Text
+  apply(person -> person.name, { name: "Ada", age: 1 })
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_unknown_open_record_fields_at_field_span() {
+    let source_text = r#"bad(person: { name: Text, ...r }) : Text
+  person.title
+"#;
+    let result = check_single("rows.fx", source_text);
+
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("unknown record field `title`"))
+        .expect("unknown field diagnostic");
+    assert_eq!(diagnostic.span.start, offset_of(source_text, "title"));
+}
+
+#[test]
 fn reports_open_record_required_field_type_mismatches() {
     let result = check_single(
         "rows.fx",
@@ -1207,6 +1269,46 @@ pick(todo: Todo, todos: List Todo) : Text
             .expect("rest hover")
             .contents,
         "rest : List Todo"
+    );
+}
+
+#[test]
+fn hovers_open_record_field_access() {
+    let source_text = r#"greet(person: { name: Text, ...r }) : Text
+  person.name
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at(
+                "main",
+                offset_of(source_text, "person.name") + "person.".len()
+            )
+            .expect("open record field hover")
+            .contents,
+        "name : Text"
+    );
+}
+
+#[test]
+fn hovers_open_record_alias_field_access() {
+    let source_text = r#"type Person = { name: Text, ...r }
+
+greet(person: Person) : Text
+  person.name
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at(
+                "main",
+                offset_of(source_text, "person.name") + "person.".len()
+            )
+            .expect("open record alias field hover")
+            .contents,
+        "name : Text"
     );
 }
 
