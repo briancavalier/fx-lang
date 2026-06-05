@@ -88,7 +88,7 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let mut module_diagnostics = BTreeMap::new();
     let mut module_types = BTreeMap::new();
     let mut typed_spans = BTreeMap::new();
-    let type_defs = collect_type_definitions(graph);
+    let (type_defs, mut lowering_diagnostics) = collect_type_definitions(graph);
     let symbol_types = collect_symbol_types(graph);
     let constructor_arities = collect_constructor_arities(graph);
     let symbol_tables = SymbolTables::new(graph);
@@ -96,7 +96,9 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     for module in graph.modules.values() {
         let mut checker = ModuleChecker {
             module,
-            diagnostics: Vec::new(),
+            diagnostics: lowering_diagnostics
+                .remove(&module.name)
+                .unwrap_or_default(),
             top_level: collect_visible_types(module, &symbol_tables, &symbol_types),
             symbol_types: &symbol_types,
             type_defs: &type_defs,
@@ -223,7 +225,7 @@ impl ModuleChecker<'_> {
     fn check_value_decl(&mut self, decl: &ValueDecl) {
         let mut env = self.top_level.clone();
         for param in &decl.params {
-            let ty = lower_type(&param.annotation);
+            let ty = self.lower_type(&param.annotation);
             self.add_typed_span(
                 param.name.span,
                 TypedSpanKind::Parameter,
@@ -232,7 +234,7 @@ impl ModuleChecker<'_> {
             );
             env.insert(param.name.text.clone(), ty);
         }
-        let expected = lower_type(&decl.annotation);
+        let expected = self.lower_type(&decl.annotation);
         self.check_block(&decl.body, &env, &expected);
     }
 
@@ -882,6 +884,13 @@ impl ModuleChecker<'_> {
             display_type: ty.to_string(),
         });
     }
+
+    fn lower_type(&mut self, ty: &TypeExpr) -> Type {
+        let mut lowerer = TypeLowerer::default();
+        let ty = lowerer.lower_type(ty);
+        self.diagnostics.extend(lowerer.diagnostics);
+        ty
+    }
 }
 
 trait ConstructorFallback {
@@ -939,21 +948,30 @@ fn collect_local_types(
         .collect()
 }
 
-fn collect_type_definitions(graph: &ModuleGraph) -> BTreeMap<String, TypeDef> {
+fn collect_type_definitions(
+    graph: &ModuleGraph,
+) -> (BTreeMap<String, TypeDef>, BTreeMap<String, Vec<Diagnostic>>) {
     let mut defs = BTreeMap::new();
+    let mut diagnostics = BTreeMap::new();
     for module in graph.modules.values() {
         for item in &module.parsed.module.items {
             if let Item::Type(decl) = item {
+                let mut lowerer = TypeLowerer::default();
+                let body = lowerer.lower_type(&decl.body);
+                diagnostics
+                    .entry(module.name.clone())
+                    .or_insert_with(Vec::new)
+                    .extend(lowerer.diagnostics);
                 let def = TypeDef {
                     params: decl.params.iter().map(|param| param.text.clone()).collect(),
-                    body: lower_type(&decl.body),
+                    body,
                 };
                 defs.insert(decl.name.text.clone(), def.clone());
                 defs.insert(format!("{}.{}", module.name, decl.name.text), def);
             }
         }
     }
-    defs
+    (defs, diagnostics)
 }
 
 fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
@@ -1021,62 +1039,122 @@ fn collect_constructor_arities(graph: &ModuleGraph) -> BTreeMap<String, usize> {
 }
 
 fn lower_type(ty: &TypeExpr) -> Type {
-    match ty {
-        TypeExpr::Named { path, .. } => match path
-            .iter()
-            .map(|name| name.text.as_str())
-            .collect::<Vec<_>>()
-            .join(".")
-            .as_str()
-        {
-            "Unit" => Type::Unit,
-            "Bool" => Type::Bool,
-            "Int" => Type::Int,
-            "Text" => Type::Text,
-            other => Type::Named {
-                name: other.to_string(),
-                args: Vec::new(),
-            },
-        },
-        TypeExpr::Var(name) => Type::Var(name.text.clone()),
-        TypeExpr::App { callee, args, .. } => {
-            let callee = lower_type(callee);
-            match callee {
-                Type::Named { name, args: _ } if name == "List" && args.len() == 1 => {
-                    Type::List(Box::new(lower_type(&args[0])))
-                }
-                Type::Named {
-                    name,
-                    args: base_args,
-                } if base_args.is_empty() => Type::Named {
-                    name,
-                    args: args.iter().map(lower_type).collect(),
+    TypeLowerer::default().lower_type(ty)
+}
+
+#[derive(Default)]
+struct TypeLowerer {
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl TypeLowerer {
+    fn lower_type(&mut self, ty: &TypeExpr) -> Type {
+        match ty {
+            TypeExpr::Named { path, .. } => match path
+                .iter()
+                .map(|name| name.text.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+                .as_str()
+            {
+                "Unit" => Type::Unit,
+                "Bool" => Type::Bool,
+                "Int" => Type::Int,
+                "Text" => Type::Text,
+                other => Type::Named {
+                    name: other.to_string(),
+                    args: Vec::new(),
                 },
-                _ => Type::Unknown,
+            },
+            TypeExpr::Var(name) => Type::Var(name.text.clone()),
+            TypeExpr::App { callee, args, .. } => {
+                let callee = self.lower_type(callee);
+                match callee {
+                    Type::Named { name, args: _ } if name == "List" && args.len() == 1 => {
+                        Type::List(Box::new(self.lower_type(&args[0])))
+                    }
+                    Type::Named {
+                        name,
+                        args: base_args,
+                    } if base_args.is_empty() => Type::Named {
+                        name,
+                        args: args.iter().map(|arg| self.lower_type(arg)).collect(),
+                    },
+                    _ => Type::Unknown,
+                }
             }
+            TypeExpr::Function { params, result, .. } => Type::Function(
+                params.iter().map(|param| self.lower_type(param)).collect(),
+                Box::new(self.lower_type(result)),
+            ),
+            TypeExpr::Record { fields, tail, .. } => self.lower_record_type(fields, tail),
+            TypeExpr::Variant { cases, tail, .. } => self.lower_variant_type(cases, tail),
+            TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => Type::Unknown,
         }
-        TypeExpr::Function { params, result, .. } => Type::Function(
-            params.iter().map(lower_type).collect(),
-            Box::new(lower_type(result)),
-        ),
-        TypeExpr::Record { fields, .. } => Type::closed_record(
-            fields
-                .iter()
-                .map(|field| (field.name.text.clone(), lower_type(&field.value)))
-                .collect(),
-        ),
-        TypeExpr::Variant { cases, .. } => Type::closed_variant(
-            cases
-                .iter()
-                .map(|case| {
-                    (
-                        case.name.text.clone(),
-                        case.payload.iter().map(lower_type).collect(),
-                    )
-                })
-                .collect(),
-        ),
-        TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => Type::Unknown,
+    }
+
+    fn lower_record_type(&mut self, fields: &[FieldType], tail: &Option<RowTail>) -> Type {
+        let mut seen = BTreeSet::new();
+        let fields = fields
+            .iter()
+            .map(|field| {
+                if !seen.insert(field.name.text.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        field.name.span,
+                        format!("duplicate record field `{}`", field.name.text),
+                    ));
+                }
+                (field.name.text.clone(), self.lower_type(&field.value))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(tail) = tail {
+            Type::Row(RowType {
+                kind: RowKind::Record,
+                entries: fields
+                    .into_iter()
+                    .map(|(name, ty)| RowEntry::Field { name, ty })
+                    .collect(),
+                tail: Some(RowTailType::Var(tail.name.text.clone())),
+            })
+        } else {
+            Type::closed_record(fields)
+        }
+    }
+
+    fn lower_variant_type(&mut self, cases: &[VariantCaseType], tail: &Option<RowTail>) -> Type {
+        let mut seen = BTreeSet::new();
+        let cases = cases
+            .iter()
+            .map(|case| {
+                if !seen.insert(case.name.text.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        case.name.span,
+                        format!("duplicate variant case `{}`", case.name.text),
+                    ));
+                }
+                (
+                    case.name.text.clone(),
+                    case.payload
+                        .iter()
+                        .map(|payload| self.lower_type(payload))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(tail) = tail {
+            Type::Row(RowType {
+                kind: RowKind::Variant,
+                entries: cases
+                    .into_iter()
+                    .map(|(name, payload)| RowEntry::Case { name, payload })
+                    .collect(),
+                tail: Some(RowTailType::Var(tail.name.text.clone())),
+            })
+        } else {
+            Type::closed_variant(cases)
+        }
     }
 }
 

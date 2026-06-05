@@ -295,6 +295,32 @@ accept-variant(result: < Ok(Int), Missing() >) : Int
 }
 
 #[test]
+fn hovers_open_record_and_variant_row_types() {
+    let source_text = r#"greet(person: { name: Text, ...r }) : Text
+  "Hello, " ++ person.name
+
+message(result: < Ok(a), Error(Text), ...r >) : Text
+  "unknown"
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "greet"))
+            .expect("record row function hover")
+            .contents,
+        "greet : ({ name: Text, ...r }) -> Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "message"))
+            .expect("variant row function hover")
+            .contents,
+        "message : (< Ok(a), Error(Text), ...r >) -> Text"
+    );
+}
+
+#[test]
 fn checks_structural_record_updates() {
     let result = check_single(
         "record.fx",
@@ -327,6 +353,48 @@ bad(todo: Todo) : Todo
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("unknown record field `done`"))
+    );
+}
+
+#[test]
+fn reports_duplicate_record_fields_in_aliases() {
+    let result = check_single(
+        "record.fx",
+        r#"type Person = { name: Text, name: Int }
+
+value() : Int
+  1
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate record field `name`"))
+    );
+}
+
+#[test]
+fn reports_duplicate_record_fields_in_annotations() {
+    let result = check_single(
+        "record.fx",
+        r#"bad(person: { name: Text, name: Int }) : { id: Int, id: Text }
+  { id: 1 }
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate record field `name`"))
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate record field `id`"))
     );
 }
 
@@ -571,6 +639,25 @@ bad() : Result
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
+    );
+}
+
+#[test]
+fn reports_duplicate_variant_cases_in_aliases() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Ok(Text) >
+
+value() : Int
+  1
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate variant case `Ok`"))
     );
 }
 

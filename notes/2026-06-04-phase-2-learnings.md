@@ -67,3 +67,23 @@ evidence that produced them.
   and variant rows to unify accidentally.
 - Revisit when: Parsed row tails are lowered into checker types and row
   variables are scoped.
+
+- Decision: Lower parsed row tails into checker row types before row
+  unification.
+- Context: Type lowering now carries parsed record and variant row tails into
+  `RowTailType::Var`, so hovers and diagnostics can show open rows such as
+  `{ name: Text, ...r }` and `< Ok(a), Error(Text), ...r >`.
+- Applies to phase(s): Phase 2.
+- Future implication: Row unification should consume the existing lowered tail
+  instead of reparsing or reconstructing tail syntax from source AST nodes.
+- Revisit when: Width-polymorphic row compatibility is implemented.
+
+- Decision: Report duplicate row labels from checker-owned lowering.
+- Context: Duplicate record fields and duplicate variant cases are now detected
+  while lowering type aliases and value annotations into checker row types.
+  These diagnostics are owned by the module being checked.
+- Applies to phase(s): Phase 2.
+- Future implication: Parser support can stay recovery-focused, while semantic
+  row validation remains attached to the same module-owned diagnostics path as
+  other checker errors.
+- Revisit when: Duplicate labels need diagnostic codes or fix suggestions.
