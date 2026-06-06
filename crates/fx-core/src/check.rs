@@ -105,6 +105,8 @@ enum CompatibilityError {
     Mismatch,
     TypeMismatch { expected: Type, found: Type },
     RowKind { expected: RowKind, found: RowKind },
+    MissingField { name: String },
+    MissingCase { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,6 +952,12 @@ impl ModuleChecker<'_> {
             Err(CompatibilityError::TypeMismatch { expected, found }) => {
                 format!("expected `{expected}`, found `{found}`")
             }
+            Err(CompatibilityError::MissingField { name }) => {
+                format!("record row is missing field `{name}`")
+            }
+            Err(CompatibilityError::MissingCase { name }) => {
+                format!("variant row is missing case `{name}`")
+            }
             Err(CompatibilityError::Mismatch) | Ok(()) => fallback,
         }
     }
@@ -1590,10 +1598,12 @@ fn unify_record_rows(
         };
         required.insert(name.clone());
         let Some(found_ty) = found.field(name) else {
-            return Err(CompatibilityError::Mismatch);
+            return Err(CompatibilityError::MissingField { name: name.clone() });
         };
         unify_compatible(found_ty, ty, subst).map_err(|error| match error {
-            CompatibilityError::RowKind { .. } => error,
+            CompatibilityError::RowKind { .. }
+            | CompatibilityError::MissingField { .. }
+            | CompatibilityError::MissingCase { .. } => error,
             CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                 CompatibilityError::TypeMismatch {
                     expected: ty.clone(),
@@ -1635,14 +1645,16 @@ fn unify_variant_rows(
         };
         required.insert(name.clone());
         let Some(found_payload) = found.case(name) else {
-            return Err(CompatibilityError::Mismatch);
+            return Err(CompatibilityError::MissingCase { name: name.clone() });
         };
         if payload.len() != found_payload.len() {
             return Err(CompatibilityError::Mismatch);
         }
         for (found_ty, expected_ty) in found_payload.iter().zip(payload) {
             unify_compatible(found_ty, expected_ty, subst).map_err(|error| match error {
-                CompatibilityError::RowKind { .. } => error,
+                CompatibilityError::RowKind { .. }
+                | CompatibilityError::MissingField { .. }
+                | CompatibilityError::MissingCase { .. } => error,
                 CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                     CompatibilityError::TypeMismatch {
                         expected: expected_ty.clone(),

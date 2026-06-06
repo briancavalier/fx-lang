@@ -313,10 +313,24 @@ message(result: < Ok(a), Error(Text), ...r >) : Text
     );
     assert_eq!(
         analysis
+            .hover_at("main", offset_of(source_text, "person:") + 1)
+            .expect("record row parameter hover")
+            .contents,
+        "person : { name: Text, ...r }"
+    );
+    assert_eq!(
+        analysis
             .hover_at("main", offset_of(source_text, "message"))
             .expect("variant row function hover")
             .contents,
         "message : (< Ok(a), Error(Text), ...r >) -> Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "result:") + 1)
+            .expect("variant row parameter hover")
+            .contents,
+        "result : < Ok(a), Error(Text), ...r >"
     );
 }
 
@@ -432,7 +446,7 @@ bad() : Text
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `{ name: Text, ...r }`, found `{ age: Int }`")
+            .contains("record row is missing field `name`")
     }));
 }
 
@@ -492,8 +506,29 @@ bad(result: Result) : Int
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `< Ok(Int), ...r >`, found `Result`")
+            .contains("variant row is missing case `Ok`")
     }));
+}
+
+#[test]
+fn row_missing_member_diagnostics_hide_internal_scopes() {
+    let result = check_single(
+        "rows.fx",
+        r#"bad(person: { name: Text, ...r }) : { title: Text, ...r }
+  person
+"#,
+    );
+
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic
+                .message
+                .contains("record row is missing field `title`")
+        })
+        .expect("missing field diagnostic");
+    assert!(!diagnostic.message.contains("::"));
 }
 
 #[test]
@@ -1102,7 +1137,7 @@ bad() : < Ok(Int), ...r >
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `< Ok(Int), ...r >`, found `OnlyMissing`")
+            .contains("variant row is missing case `Ok`")
     }));
 }
 
@@ -1570,6 +1605,28 @@ greet(person: Person) : Text
 }
 
 #[test]
+fn hovers_substituted_open_row_call_results() {
+    let source_text = r#"keep(person: { name: Text, ...r }) : { name: Text, ...r }
+  person
+
+main() : Text
+  person =
+    keep({ name: "Ada", age: 1 })
+
+  person.name
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "person ="))
+            .expect("substituted local hover")
+            .contents,
+        "person : { name: Text, age: Int }"
+    );
+}
+
+#[test]
 fn hovers_record_update_fields() {
     let source_text = r#"type Todo = {
   done: Bool
@@ -1699,6 +1756,24 @@ value() : Result
         analysis
             .hover_at("main", offset_of(source_text, "Ok(Int)"))
             .expect("constructor hover")
+            .contents,
+        "Ok : (Int) -> Result"
+    );
+}
+
+#[test]
+fn hovers_constructor_expressions() {
+    let source_text = r#"type Result = < Ok(Int), Missing() >
+
+value() : Result
+  Ok(1)
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "Ok(1)"))
+            .expect("constructor expression hover")
             .contents,
         "Ok : (Int) -> Result"
     );

@@ -171,3 +171,23 @@ evidence that produced them.
   patterns.
 - Revisit when: Open variants need exhaustiveness analysis or anonymous
   constructor values.
+
+- Decision: Keep compact row display centralized in `Display` implementations.
+- Context: Hovers and diagnostics use the same user-facing type formatter, so
+  open rows render as `{ name: Text, ...r }` and
+  `< Ok(a), Error(Text), ...r >` without exposing scoped internal variable
+  identities.
+- Applies to phase(s): Phase 2.
+- Future implication: LSP and CLI surfaces should consume formatted checker
+  types rather than duplicating row rendering logic.
+- Revisit when: Rows need multi-line formatting or diagnostic-specific
+  pretty-printing.
+
+- Decision: Use row-specific diagnostics for kind and missing-label failures.
+- Context: Row kind mismatches now say whether a record or variant row was
+  expected, and missing required members name the field or case directly.
+  Payload mismatches remain ordinary type mismatches.
+- Applies to phase(s): Phase 2.
+- Future implication: Later row constraints can add richer context around the
+  same user-facing labels without exposing unifier internals.
+- Revisit when: Diagnostics gain structured codes or fix suggestions.
