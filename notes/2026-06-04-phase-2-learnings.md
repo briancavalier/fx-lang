@@ -154,8 +154,20 @@ evidence that produced them.
   constructors are treated as variant values outside callee position, while
   constructor calls still use the declared function type.
 - Applies to phase(s): Phase 2.
-- Future implication: Inline open variant annotations do not define
-  constructors by themselves; later matching work should continue resolving
-  cases through declared variant constructors.
-- Revisit when: Open-variant matching or anonymous variant constructors are
-  designed.
+- Future implication: Inline open variant annotations do not define constructor
+  values by themselves; matching may still validate explicit row cases from the
+  expected scrutinee type.
+- Revisit when: Anonymous variant constructors are designed.
+
+- Decision: Open-variant matching checks explicit cases on open rows.
+- Context: Constructor patterns now accept variant rows with tails when the
+  case is present in the row's explicit entries. Pattern-constructor resolver
+  misses are left for the checker so inline open variants can match cases that
+  are not declared constructor symbols. Fallback binders still bind the whole
+  scrutinee type; they do not compute a row remainder.
+- Applies to phase(s): Phase 2.
+- Future implication: Exhaustiveness, redundancy, and fallback row narrowing
+  need separate row-remainder semantics instead of being inferred from name
+  patterns.
+- Revisit when: Open variants need exhaustiveness analysis or anonymous
+  constructor values.

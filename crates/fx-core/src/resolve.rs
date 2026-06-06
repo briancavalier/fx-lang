@@ -273,7 +273,7 @@ impl ModuleResolver<'_> {
                 locals.insert(name.text.clone());
             }
             Pattern::Constructor { name, args, .. } => {
-                self.resolve_symbol_name(&name.text, name.span, Some(SymbolKind::Constructor));
+                self.resolve_pattern_constructor_name(&name.text, name.span);
                 for arg in args {
                     self.resolve_pattern(arg, locals);
                 }
@@ -347,16 +347,34 @@ impl ModuleResolver<'_> {
     }
 
     fn resolve_symbol_name(&mut self, name: &str, span: Span, kind: Option<SymbolKind>) {
+        self.resolve_symbol_reference(name, span, kind, true);
+    }
+
+    fn resolve_pattern_constructor_name(&mut self, name: &str, span: Span) {
+        self.resolve_symbol_reference(name, span, Some(SymbolKind::Constructor), false);
+    }
+
+    fn resolve_symbol_reference(
+        &mut self,
+        name: &str,
+        span: Span,
+        kind: Option<SymbolKind>,
+        diagnose_missing: bool,
+    ) {
         match resolve_visible_symbol(self.module, self.symbols, name, kind) {
             Ok(Some(target)) => self.references.push(ResolvedReference {
                 name: name.to_string(),
                 span,
                 target,
             }),
-            Ok(None) => self.diagnostics.push(Diagnostic::new(
-                span,
-                format!("unknown {}", describe_name(kind, name)),
-            )),
+            Ok(None) => {
+                if diagnose_missing {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!("unknown {}", describe_name(kind, name)),
+                    ));
+                }
+            }
             Err(candidates) => self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(

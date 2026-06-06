@@ -243,9 +243,9 @@ impl Type {
         }
     }
 
-    fn as_closed_variant(&self) -> Option<&RowType> {
+    fn as_variant_row(&self) -> Option<&RowType> {
         match self {
-            Type::Row(row) if row.kind == RowKind::Variant && row.tail.is_none() => Some(row),
+            Type::Row(row) if row.kind == RowKind::Variant => Some(row),
             _ => None,
         }
     }
@@ -766,7 +766,7 @@ impl ModuleChecker<'_> {
             }
             Pattern::Constructor { name, args, span } => {
                 let expected_variant = self.expand_alias(expected);
-                if let Some(row) = expected_variant.as_closed_variant() {
+                if let Some(row) = expected_variant.as_variant_row() {
                     if let Some(payload) = row.case(&name.text) {
                         if payload.len() != args.len() {
                             self.diagnostics.push(Diagnostic::new(
@@ -800,7 +800,7 @@ impl ModuleChecker<'_> {
                         self.check_pattern(arg, &Type::Unknown, env, bound_names);
                     }
                 } else {
-                    self.constructor_type(&name.text, args.len(), *span);
+                    self.constructor_type(&name.text, args.len(), *span, true);
                     for arg in args {
                         self.check_pattern(arg, &Type::Unknown, env, bound_names);
                     }
@@ -886,8 +886,22 @@ impl ModuleChecker<'_> {
         }
     }
 
-    fn constructor_type(&mut self, name: &str, arg_count: usize, span: Span) -> Option<Type> {
-        let expected = self.constructor_arities.get(name)?;
+    fn constructor_type(
+        &mut self,
+        name: &str,
+        arg_count: usize,
+        span: Span,
+        diagnose_missing: bool,
+    ) -> Option<Type> {
+        let Some(expected) = self.constructor_arities.get(name) else {
+            if diagnose_missing {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("unknown constructor `{name}`"),
+                ));
+            }
+            return None;
+        };
         if *expected != arg_count {
             self.diagnostics.push(Diagnostic::new(
                 span,
@@ -1048,7 +1062,7 @@ impl ConstructorFallback for Type {
             return self;
         }
         checker
-            .constructor_type(name, 0, span)
+            .constructor_type(name, 0, span, false)
             .unwrap_or(Type::Unknown)
     }
 }

@@ -1146,6 +1146,116 @@ bad(result: Result) : Int
 }
 
 #[test]
+fn checks_open_variant_pattern_constructors() {
+    let result = check_single(
+        "variant.fx",
+        r#"message(result: < Ok(a), Missing(), Error(Text), ...r >) : Text
+  match result
+    Ok(_) ->
+      "ok"
+
+    Missing() ->
+      "missing"
+
+    Error(text) ->
+      text
+
+    other ->
+      "unknown"
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checker_runs_on_phase_2_rows_fixture_open_variant_matching() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-2"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-2/rows.fx"),
+            source: include_str!("../../../examples/phase-2/rows.fx").to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_unknown_open_variant_pattern_constructors() {
+    let result = check_single(
+        "variant.fx",
+        r#"bad(result: < Ok(Int), ...r >) : Int
+  match result
+    Missing() ->
+      0
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("constructor `Missing` is not part of `< Ok(Int), ...r >`")
+    }));
+}
+
+#[test]
+fn reports_unknown_pattern_constructors_when_scrutinee_type_is_unknown() {
+    let result = check_single(
+        "variant.fx",
+        r#"bad() : Int
+  match missing
+    Nope(value) ->
+      0
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown constructor `Nope`"))
+    );
+}
+
+#[test]
+fn reports_open_variant_pattern_arity_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"bad(result: < Ok(Int), ...r >) : Int
+  match result
+    Ok() ->
+      0
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("constructor `Ok` expects 1 arguments, found 0")
+    }));
+}
+
+#[test]
+fn reports_open_variant_pattern_payload_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"bad(result: < Ok(Int), ...r >) : Int
+  match result
+    Ok("nope") ->
+      0
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("pattern expects `Int`, found `Text`")
+    }));
+}
+
+#[test]
 fn checks_record_patterns_and_literal_patterns() {
     let result = check_single(
         "patterns.fx",
@@ -1549,6 +1659,34 @@ label(result: Result) : Int
 }
 
 #[test]
+fn hovers_open_variant_pattern_payloads_and_fallbacks() {
+    let source_text = r#"message(result: < Ok(a), Error(Text), ...r >) : Text
+  match result
+    Error(text) ->
+      text
+
+    other ->
+      "unknown"
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "text)"))
+            .expect("payload hover")
+            .contents,
+        "text : Text"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "other ->"))
+            .expect("fallback hover")
+            .contents,
+        "other : < Ok(a), Error(Text), ...r >"
+    );
+}
+
+#[test]
 fn hovers_constructor_declarations() {
     let source_text = r#"type Result = < Ok(Int), Missing() >
 
@@ -1728,6 +1866,26 @@ main() : Result
     let ok_def = analysis
         .definition_at("main", offset_of(source_text, "Ok(1)"))
         .expect("constructor definition");
+    assert_eq!(ok_def.span.start, offset_of(source_text, "Ok(Int)"));
+}
+
+#[test]
+fn definition_finds_declared_constructor_pattern_targets() {
+    let source_text = r#"type Result = < Ok(Int), Missing() >
+
+main(result: Result) : Int
+  match result
+    Ok(value) ->
+      value
+
+    Missing() ->
+      0
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let ok_def = analysis
+        .definition_at("main", offset_of(source_text, "Ok(value)"))
+        .expect("constructor pattern definition");
     assert_eq!(ok_def.span.start, offset_of(source_text, "Ok(Int)"));
 }
 
