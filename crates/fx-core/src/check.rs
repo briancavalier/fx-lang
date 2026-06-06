@@ -674,7 +674,7 @@ impl ModuleChecker<'_> {
             }
             return Type::Unknown;
         };
-        if row.kind != RowKind::Record || row.tail.is_some() {
+        if row.kind != RowKind::Record {
             self.diagnostics.push(Diagnostic::new(
                 base.span(),
                 format!("record update requires a record, found `{base_ty}`"),

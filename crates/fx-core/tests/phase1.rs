@@ -653,6 +653,82 @@ fn checks_structural_record_updates() {
 }
 
 #[test]
+fn checks_open_record_updates_to_known_fields() {
+    let result = check_single(
+        "record.fx",
+        r#"rename(person: { name: Text, ...r }) : { name: Text, ...r }
+  { ...person, name: "Grace" }
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_open_record_alias_updates_to_known_fields() {
+    let result = check_single(
+        "record.fx",
+        r#"type Person = { name: Text, ...r }
+
+rename(person: Person) : Person
+  { ...person, name: "Grace" }
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_open_record_updates_after_row_polymorphic_calls() {
+    let result = check_single(
+        "record.fx",
+        r#"keep(person: { name: Text, ...r }) : { name: Text, ...r }
+  person
+
+main() : { name: Text, age: Int }
+  person =
+    keep({ name: "Ada", age: 1 })
+
+  { ...person, name: "Grace" }
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_open_record_update_value_type_mismatches() {
+    let result = check_single(
+        "record.fx",
+        r#"bad(person: { name: Text, ...r }) : { name: Text, ...r }
+  { ...person, name: 1 }
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Text`, found `Int`"))
+    );
+}
+
+#[test]
+fn reports_unknown_open_record_update_fields_at_field_span() {
+    let source_text = r#"bad(person: { name: Text, ...r }) : { name: Text, ...r }
+  { ...person, age: 1 }
+"#;
+    let result = check_single("record.fx", source_text);
+
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("unknown record field `age`"))
+        .expect("unknown update field diagnostic");
+    assert_eq!(diagnostic.span.start, offset_of(source_text, "age:"));
+}
+
+#[test]
 fn reports_unknown_record_update_fields() {
     let result = check_single(
         "record.fx",
@@ -1329,6 +1405,22 @@ mark-done(todo: Todo) : Todo
             .expect("field hover")
             .contents,
         "done : Bool"
+    );
+}
+
+#[test]
+fn hovers_open_record_update_fields() {
+    let source_text = r#"rename(person: { name: Text, ...r }) : { name: Text, ...r }
+  { ...person, name: "Grace" }
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "name: \"Grace\""))
+            .expect("open update field hover")
+            .contents,
+        "name : Text"
     );
 }
 

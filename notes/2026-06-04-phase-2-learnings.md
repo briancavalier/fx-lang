@@ -136,3 +136,13 @@ evidence that produced them.
   required-field boundary unless it deliberately decides how row tails gain new
   fields.
 - Revisit when: Row constraints or row-tail field insertion are designed.
+
+- Decision: Open-record updates are limited to statically required fields.
+- Context: Record update now accepts open record bases when every updated field
+  is already present in the row's explicit entries. Fields that might exist only
+  in the row tail still report `unknown record field`, and adding fields through
+  an unconstrained row tail remains deferred.
+- Applies to phase(s): Phase 2.
+- Future implication: Row-tail insertion or narrowing needs a separate design
+  decision instead of falling out of update syntax accidentally.
+- Revisit when: Row constraints can express field insertion or removal.
