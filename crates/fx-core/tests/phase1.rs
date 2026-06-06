@@ -1036,6 +1036,77 @@ bad() : Result
 }
 
 #[test]
+fn checks_constructors_against_open_variant_rows() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing(), Error(Text) >
+
+ok() : < Ok(Int), ...r >
+  Ok(1)
+
+missing-bare() : < Missing(), ...r >
+  Missing
+
+missing-call() : < Missing(), ...r >
+  Missing()
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_generic_constructors_against_open_variant_rows() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Option a = < Some(a), None() >
+
+some-text() : < Some(Text), ...r >
+  Some("text")
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_open_variant_constructor_payload_mismatches() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Ok(Int), Missing() >
+
+bad() : < Ok(Int), ...r >
+  Ok("nope")
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `Int`, found `Text`"))
+    );
+}
+
+#[test]
+fn reports_constructors_missing_required_open_variant_cases() {
+    let result = check_single(
+        "variant.fx",
+        r#"type OnlyMissing = < Missing() >
+
+bad() : < Ok(Int), ...r >
+  Missing()
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `< Ok(Int), ...r >`, found `OnlyMissing`")
+    }));
+}
+
+#[test]
 fn reports_duplicate_variant_cases_in_aliases() {
     let result = check_single(
         "variant.fx",
@@ -1478,6 +1549,24 @@ label(result: Result) : Int
 }
 
 #[test]
+fn hovers_constructor_declarations() {
+    let source_text = r#"type Result = < Ok(Int), Missing() >
+
+value() : Result
+  Ok(1)
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    assert_eq!(
+        analysis
+            .hover_at("main", offset_of(source_text, "Ok(Int)"))
+            .expect("constructor hover")
+            .contents,
+        "Ok : (Int) -> Result"
+    );
+}
+
+#[test]
 fn hovers_phase_1_operators() {
     let source_text = r#"operators(left: Int, right: Int, text: Text) : Bool
   value =
@@ -1625,6 +1714,21 @@ main(todo: Todo) : Text
         .definition_at("main", offset_of(source_text, "title\n"))
         .expect("title definition");
     assert_eq!(title_def.span.start, offset_of(source_text, "title }"));
+}
+
+#[test]
+fn definition_finds_constructor_targets() {
+    let source_text = r#"type Result = < Ok(Int), Missing() >
+
+main() : Result
+  Ok(1)
+"#;
+    let analysis = analyze_single("main.fx", source_text);
+
+    let ok_def = analysis
+        .definition_at("main", offset_of(source_text, "Ok(1)"))
+        .expect("constructor definition");
+    assert_eq!(ok_def.span.start, offset_of(source_text, "Ok(Int)"));
 }
 
 #[test]

@@ -107,6 +107,12 @@ enum CompatibilityError {
     RowKind { expected: RowKind, found: RowKind },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameUse {
+    Value,
+    Callee,
+}
+
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
@@ -440,12 +446,12 @@ impl ModuleChecker<'_> {
             && name.contains('.')
             && !qualified_root_is_local(&name, &env.keys().cloned().collect::<BTreeSet<_>>())
         {
-            return self.resolve_expr_name(&name, expr.span(), env);
+            return self.resolve_expr_name(&name, expr.span(), env, NameUse::Value);
         }
 
         match expr {
             Expr::Name(name) => {
-                let ty = self.resolve_expr_name(&name.text, name.span, env);
+                let ty = self.resolve_expr_name(&name.text, name.span, env, NameUse::Value);
                 self.add_typed_span(name.span, TypedSpanKind::Value, &name.text, &ty);
                 ty
             }
@@ -511,7 +517,7 @@ impl ModuleChecker<'_> {
                     }
                 }
             }
-            Expr::Call { callee, args, span } => match self.infer_expr(callee, env) {
+            Expr::Call { callee, args, span } => match self.infer_callee_expr(callee, env) {
                 Type::Function(params, result) => {
                     if params.len() != args.len() {
                         self.diagnostics.push(Diagnostic::new(
@@ -641,6 +647,23 @@ impl ModuleChecker<'_> {
         self.check_operator_operand(operator.label, right, &right_ty, &operator.params[1]);
 
         operator.result
+    }
+
+    fn infer_callee_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>) -> Type {
+        if let Some(name) = qualified_expr_name(expr)
+            && name.contains('.')
+            && !qualified_root_is_local(&name, &env.keys().cloned().collect::<BTreeSet<_>>())
+        {
+            return self.resolve_expr_name(&name, expr.span(), env, NameUse::Callee);
+        }
+
+        if let Expr::Name(name) = expr {
+            let ty = self.resolve_expr_name(&name.text, name.span, env, NameUse::Callee);
+            self.add_typed_span(name.span, TypedSpanKind::Value, &name.text, &ty);
+            return ty;
+        }
+
+        self.infer_expr(expr, env)
     }
 
     fn check_operator_operand(&mut self, label: &str, expr: &Expr, found: &Type, expected: &Type) {
@@ -917,7 +940,13 @@ impl ModuleChecker<'_> {
         }
     }
 
-    fn resolve_expr_name(&mut self, name: &str, span: Span, env: &BTreeMap<String, Type>) -> Type {
+    fn resolve_expr_name(
+        &mut self,
+        name: &str,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+        name_use: NameUse,
+    ) -> Type {
         if let Some(ty) = env.get(name) {
             return ty.clone();
         }
@@ -927,7 +956,17 @@ impl ModuleChecker<'_> {
         }
 
         match resolve_visible_symbol(self.module, self.symbol_tables, name, None) {
-            Ok(Some(symbol)) => self.type_for_symbol(&symbol),
+            Ok(Some(symbol)) => {
+                let ty = self.type_for_symbol(&symbol);
+                if name_use == NameUse::Value
+                    && matches!(symbol.kind, SymbolKind::Constructor)
+                    && let Type::Function(params, result) = &ty
+                    && params.is_empty()
+                {
+                    return result.as_ref().clone();
+                }
+                ty
+            }
             Ok(None) => Type::Unknown,
             Err(_) => Type::Unknown,
         }

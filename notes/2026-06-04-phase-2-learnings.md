@@ -146,3 +146,16 @@ evidence that produced them.
 - Future implication: Row-tail insertion or narrowing needs a separate design
   decision instead of falling out of update syntax accidentally.
 - Revisit when: Row constraints can express field insertion or removal.
+
+- Decision: Open-variant construction uses declared constructors plus row
+  compatibility.
+- Context: Constructors from named variant aliases can now produce values that
+  satisfy open variant annotations such as `< Ok(Int), ...r >`. Bare zero-arg
+  constructors are treated as variant values outside callee position, while
+  constructor calls still use the declared function type.
+- Applies to phase(s): Phase 2.
+- Future implication: Inline open variant annotations do not define
+  constructors by themselves; later matching work should continue resolving
+  cases through declared variant constructors.
+- Revisit when: Open-variant matching or anonymous variant constructors are
+  designed.
