@@ -629,6 +629,33 @@ mod tests {
         assert!(!done_symbols.iter().any(|symbol| symbol.name == "main"));
     }
 
+    #[test]
+    fn phase_2_rows_fixture_has_no_lsp_diagnostics_and_has_symbols() {
+        let source = include_str!("../../../examples/phase-2/rows.fx");
+        let path = "/private/tmp/rows.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let diagnostics = analysis
+            .diagnostics_by_path()
+            .get(&PathBuf::from(path))
+            .map(|diagnostics| lsp_diagnostics_for_document(&document, diagnostics))
+            .unwrap_or_default();
+
+        assert_eq!(diagnostics, []);
+
+        let symbols = document_symbols_for_document(&analysis, &document);
+        let children = symbols[0].children.as_ref().expect("children");
+        assert!(children.iter().any(|symbol| symbol.name == "greet"));
+        assert!(children.iter().any(|symbol| symbol.name == "message"));
+
+        let workspace_symbols = workspace_symbols_for_analysis(&analysis, "message");
+        assert!(
+            workspace_symbols
+                .iter()
+                .any(|symbol| symbol.name == "message")
+        );
+    }
+
     fn document(path: &str, text: &str) -> Document {
         Document::new(
             Url::from_file_path(path).expect("file url"),

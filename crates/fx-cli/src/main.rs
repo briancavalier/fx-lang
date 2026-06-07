@@ -386,6 +386,19 @@ mod tests {
     }
 
     #[test]
+    fn check_human_mode_accepts_phase_2_examples() {
+        let output = check_output(&CheckOptions {
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/phase-2"),
+            json: false,
+        })
+        .expect("phase 2 output");
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert_eq!(output.stdout, "fx check: no diagnostics\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn check_options_accept_json_before_path() {
         let options =
             CheckOptions::parse(vec!["--json".to_string(), "src".to_string()]).expect("options");

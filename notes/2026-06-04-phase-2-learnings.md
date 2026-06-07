@@ -191,3 +191,15 @@ evidence that produced them.
 - Future implication: Later row constraints can add richer context around the
   same user-facing labels without exposing unifier internals.
 - Revisit when: Diagnostics gain structured codes or fix suggestions.
+
+- Decision: Promote Phase 2 row examples to acceptance coverage.
+- Context: `examples/phase-2/rows.fx` now parses and checks successfully through
+  parser, checker, CLI, and LSP-oriented tests. Runtime validation is restored
+  after reboot, and the Clippy `result_large_err` blocker was fixed by boxing
+  large type payloads in compatibility errors without changing diagnostics.
+- Applies to phase(s): Phase 2.
+- Future implication: Later phases can treat open record and variant row
+  behavior from Phase 2 as baseline expected-passing functionality rather than
+  goal-target behavior.
+- Revisit when: Phase 2 examples expand or row diagnostics/hover contracts
+  change.

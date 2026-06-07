@@ -103,10 +103,20 @@ struct Substitution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompatibilityError {
     Mismatch,
-    TypeMismatch { expected: Type, found: Type },
-    RowKind { expected: RowKind, found: RowKind },
-    MissingField { name: String },
-    MissingCase { name: String },
+    TypeMismatch {
+        expected: Box<Type>,
+        found: Box<Type>,
+    },
+    RowKind {
+        expected: RowKind,
+        found: RowKind,
+    },
+    MissingField {
+        name: String,
+    },
+    MissingCase {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1624,8 +1634,8 @@ fn unify_record_rows(
             | CompatibilityError::MissingCase { .. } => error,
             CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                 CompatibilityError::TypeMismatch {
-                    expected: ty.clone(),
-                    found: found_ty.clone(),
+                    expected: Box::new(ty.clone()),
+                    found: Box::new(found_ty.clone()),
                 }
             }
         })?;
@@ -1675,8 +1685,8 @@ fn unify_variant_rows(
                 | CompatibilityError::MissingCase { .. } => error,
                 CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                     CompatibilityError::TypeMismatch {
-                        expected: expected_ty.clone(),
-                        found: found_ty.clone(),
+                        expected: Box::new(expected_ty.clone()),
+                        found: Box::new(found_ty.clone()),
                     }
                 }
             })?;

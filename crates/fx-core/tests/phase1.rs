@@ -1225,7 +1225,7 @@ fn checks_open_variant_pattern_constructors() {
 }
 
 #[test]
-fn checker_runs_on_phase_2_rows_fixture_open_variant_matching() {
+fn checker_runs_on_phase_2_examples() {
     let graph = index_workspace(
         &PathBuf::from("examples/phase-2"),
         vec![SourceFile {

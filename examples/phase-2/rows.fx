@@ -1,8 +1,7 @@
-# Phase 2 row-polymorphism goal target.
+# Phase 2 row-polymorphism acceptance fixture.
 #
-# This file intentionally uses Phase 2 row syntax before parser and checker
-# support has landed. Keep it as a compact target fixture, then promote pieces
-# into expected-passing tests as row support is implemented.
+# This file is intentionally compact and covers the expected-passing open-record
+# and open-variant behavior for Phase 2.
 
 greet(person: { name: Text, ...r }) : Text
   "Hello, " ++ person.name
