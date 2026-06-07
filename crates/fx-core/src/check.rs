@@ -970,6 +970,14 @@ impl ModuleChecker<'_> {
         name_use: NameUse,
     ) -> Type {
         if let Some(ty) = env.get(name) {
+            if name_use == NameUse::Value
+                && self.top_level.get(name).is_some_and(|top| top == ty)
+                && self
+                    .visible_symbol_kind(name)
+                    .is_some_and(|kind| kind == SymbolKind::Constructor)
+            {
+                return constructor_value_type(ty);
+            }
             return ty.clone();
         }
 
@@ -980,12 +988,8 @@ impl ModuleChecker<'_> {
         match resolve_visible_symbol(self.module, self.symbol_tables, name, None) {
             Ok(Some(symbol)) => {
                 let ty = self.type_for_symbol(&symbol);
-                if name_use == NameUse::Value
-                    && matches!(symbol.kind, SymbolKind::Constructor)
-                    && let Type::Function(params, result) = &ty
-                    && params.is_empty()
-                {
-                    return result.as_ref().clone();
+                if name_use == NameUse::Value && matches!(symbol.kind, SymbolKind::Constructor) {
+                    return constructor_value_type(&ty);
                 }
                 ty
             }
@@ -993,6 +997,13 @@ impl ModuleChecker<'_> {
             Err(_) => Type::Unknown,
         }
         .or_constructor(name, span, self)
+    }
+
+    fn visible_symbol_kind(&self, name: &str) -> Option<SymbolKind> {
+        resolve_visible_symbol(self.module, self.symbol_tables, name, None)
+            .ok()
+            .flatten()
+            .map(|symbol| symbol.kind)
     }
 
     fn type_for_symbol(&self, symbol: &Symbol) -> Type {
@@ -1057,6 +1068,13 @@ impl ModuleChecker<'_> {
             label: label.to_string(),
             display_type: ty.to_string(),
         });
+    }
+}
+
+fn constructor_value_type(ty: &Type) -> Type {
+    match ty {
+        Type::Function(params, result) if params.is_empty() => result.as_ref().clone(),
+        _ => ty.clone(),
     }
 }
 

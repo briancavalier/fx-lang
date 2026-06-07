@@ -4,11 +4,12 @@ Date: 2026-06-06
 
 ## Summary
 
-Runtime validation commands that execute local binaries hang in the current
-Codex shell before user code runs. Compilation still works.
+Runtime validation commands that execute local binaries hung before user code
+ran. Compilation still worked.
 
-This is an environment/local-executable launch issue, not an `fxl` checker
-regression.
+This was an environment/local-executable launch issue, not an `fxl` checker
+regression. Rebooting macOS cleared the hang, and runtime validation works
+again.
 
 ## Evidence
 
@@ -69,27 +70,36 @@ Running `target/debug/fx --help` outside the managed filesystem sandbox still
 hangs from this thread, so the issue is tied to the Codex-launched process
 context rather than only workspace sandbox permissions.
 
-## Current validation workaround
+## Resolution
 
-Until local executable launch works in this shell, use compile-only validation
-inside Codex:
+Rebooting macOS restored local executable launch. After reboot:
 
 ```sh
 cargo fmt --all --check
-cargo check
-cargo test --no-run
+cargo test
+cargo run -q -p fx-cli -- check examples/phase-2/rows.fx
 ```
 
-Run runtime validation such as `cargo test` and `fx check ...` in an external
-terminal, or in a Codex environment where local executables can launch.
+all complete normally.
 
-Do not rely on direct execution of any newly built or copied executable file
-from this Codex thread. Shell scripts may be inspected by running them through
-an existing interpreter such as `/bin/sh script.sh`, but Rust test binaries and
-CLI binaries still require an external terminal or CI runtime.
+If the hang returns, retry the tiny executable probe first:
+
+```sh
+mkdir -p /private/tmp/rust-exec-probe
+cd /private/tmp/rust-exec-probe
+cat > main.rs <<'EOF'
+fn main() {
+    println!("hello");
+}
+EOF
+rustc main.rs -o hello
+./hello
+```
+
+If `./hello` hangs, reboot before assuming a repository or toolchain
+regression.
 
 ## Revisit when
 
-- Local executable launch behavior changes in Codex.
-- Runtime validation is needed before committing a feature slice.
-- A future shell can run `target/debug/fx` and test binaries normally.
+- Local executable launch hangs again after a reboot.
+- Runtime validation fails for a repository-specific reason.

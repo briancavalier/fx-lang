@@ -1091,6 +1091,27 @@ missing-call() : < Missing(), ...r >
 }
 
 #[test]
+fn local_bindings_shadow_zero_arg_constructor_values() {
+    let result = check_single(
+        "variant.fx",
+        r#"type Result = < Missing() >
+
+bad() : Result
+  Missing =
+    1
+
+  Missing
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `Result`, found `Int`")
+    }));
+}
+
+#[test]
 fn checks_generic_constructors_against_open_variant_rows() {
     let result = check_single(
         "variant.fx",
