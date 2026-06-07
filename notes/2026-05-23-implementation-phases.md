@@ -167,6 +167,80 @@ message(result: < Ok(a), Missing(), Error(Text), ...r >) : Text
     other -> "unknown"
 ```
 
+## Phase 2.5: Executable core and JavaScript backend spike
+
+Goal: make the accepted pure language runnable before effects introduce
+handler/runtime design pressure.
+
+This phase should add a narrow executable compiler path for the Phase 1 and
+Phase 2 language. It should establish a desugared core IR and a first backend
+target without trying to make the backend production-ready.
+
+Target JavaScript first. JavaScript gives the shortest path to runnable output
+for records, variants, lists, closures, recursion, and modules, and it leaves
+room for later effect-handler experiments in direct style, CPS, generators, or
+a small runtime protocol. Native targets such as C should wait until memory
+management, closure representation, string/list layout, tail calls, and runtime
+ownership decisions are better understood.
+
+Include:
+
+- a desugared core IR for the accepted pure language;
+- lowering from checked modules into that core IR;
+- JavaScript code generation for Phase 1 and Phase 2 examples;
+- a small JavaScript runtime for variant values, pattern matching, list helpers,
+  and other required primitives;
+- a CLI compile command such as `fx compile --target js`;
+- runnable smoke tests that execute generated JavaScript with Node;
+- example artifacts under `examples/phase-2.5/` or compact acceptance programs
+  that exercise pure runtime behavior.
+
+Defer:
+
+- effect declarations, effect rows, handlers, and resumptions;
+- scoped effects and coeffects;
+- production packaging, bundling, source maps, and optimization;
+- C or native code generation;
+- full standard-library design;
+- advanced tail-call implementation beyond documenting the current runtime
+  behavior and preserving tail-position information where practical.
+
+Compiler success criteria:
+
+- compiles accepted Phase 1 and Phase 2 examples to JavaScript;
+- generated JavaScript runs under Node and produces expected observable values;
+- record field access, record update, variants, match expressions, lists,
+  functions, lambdas, and imports/modules behave consistently with checker
+  semantics;
+- compiler diagnostics preserve the existing parser/checker failure behavior
+  before code generation starts.
+
+Tooling success criteria:
+
+- `fx check` remains the validation path for diagnostics and LSP behavior;
+- `fx compile --target js` rejects programs with diagnostics before emitting
+  code;
+- generated output tests are small, deterministic, and separate from parser,
+  checker, and LSP tests.
+
+Example target:
+
+```fx
+export type Result a = < Ok(a), Missing(), Error(Text) >
+
+greet(person: { name: Text, ...r }) : Text
+  "Hello, " ++ person.name
+
+message(result: Result Text) : Text
+  match result
+    Ok(text) -> greet({ name: text, done: false })
+    Missing() -> "missing"
+    Error(text) -> text
+
+main : Text
+  message(Ok("Grace"))
+```
+
 ## Phase 3: Effects
 
 Goal: ordinary algebraic effect declarations and effect rows.
