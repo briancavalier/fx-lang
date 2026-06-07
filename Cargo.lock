@@ -168,6 +168,7 @@ name = "fx-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fx-compiler",
  "fx-core",
  "fx-syntax",
  "serde",

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+fx-compiler.workspace = true
 fx-core.workspace = true
 fx-syntax.workspace = true
 serde.workspace = true

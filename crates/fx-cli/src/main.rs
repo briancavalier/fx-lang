@@ -1,4 +1,7 @@
 use anyhow::{Context, Result, bail};
+use fx_compiler::{
+    CompileOptions, CompileTarget, emit_javascript_modules, lower_to_core, prepare_compile,
+};
 use fx_core::{Analysis, AnalysisDiagnostic, SourceFile, analyze_workspace, index_workspace};
 use fx_syntax::parse_file;
 use fx_syntax::span::Span;
@@ -32,6 +35,13 @@ fn main() -> Result<ExitCode> {
         "check" => {
             let options = CheckOptions::parse(args.collect())?;
             let output = check_output(&options)?;
+            print!("{stdout}", stdout = output.stdout);
+            eprint!("{stderr}", stderr = output.stderr);
+            output.exit_code
+        }
+        "compile" => {
+            let options = CompileCliOptions::parse(args.collect())?;
+            let output = compile_output(&options)?;
             print!("{stdout}", stdout = output.stdout);
             eprint!("{stderr}", stderr = output.stderr);
             output.exit_code
@@ -94,12 +104,65 @@ fn usage() {
     eprintln!("  fx parse <file.fx>");
     eprintln!("  fx symbols [root]");
     eprintln!("  fx check [--json] [root-or-file]");
+    eprintln!("  fx compile --target js [--out-dir dir] [root-or-file]");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckOptions {
     path: PathBuf,
     json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompileCliOptions {
+    path: PathBuf,
+    target: CompileTarget,
+    out_dir: Option<PathBuf>,
+}
+
+impl CompileCliOptions {
+    fn parse(args: Vec<String>) -> Result<Self> {
+        let mut target = None;
+        let mut out_dir = None;
+        let mut path = None;
+        let mut iter = args.into_iter();
+
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--target" => {
+                    let value = iter
+                        .next()
+                        .with_context(|| "`compile --target` requires a target")?;
+                    target = Some(parse_compile_target(&value)?);
+                }
+                "--out-dir" => {
+                    let value = iter
+                        .next()
+                        .with_context(|| "`compile --out-dir` requires a directory")?;
+                    out_dir = Some(PathBuf::from(value));
+                }
+                _ if path.is_none() => path = Some(PathBuf::from(arg)),
+                _ => bail!("unexpected argument `{arg}`"),
+            }
+        }
+
+        let Some(target) = target else {
+            bail!("`compile` requires `--target js`");
+        };
+
+        Ok(Self {
+            path: path.unwrap_or_else(|| PathBuf::from(".")),
+            target,
+            out_dir,
+        })
+    }
+}
+
+fn parse_compile_target(target: &str) -> Result<CompileTarget> {
+    match target {
+        "js" | "javascript" => Ok(CompileTarget::JavaScript),
+        other => bail!("unknown compile target `{other}`"),
+    }
 }
 
 impl CheckOptions {
@@ -133,6 +196,66 @@ fn check_output(options: &CheckOptions) -> Result<CommandOutput> {
     let (root, files) = collect_check_files(&options.path)?;
     let analysis = analyze_workspace(&root, files);
     render_check_output(&analysis, options.json)
+}
+
+fn compile_output(options: &CompileCliOptions) -> Result<CommandOutput> {
+    let (root, files) = collect_check_files(&options.path)?;
+    let analysis = analyze_workspace(&root, files);
+    let session = match prepare_compile(
+        analysis.clone(),
+        CompileOptions {
+            target: options.target,
+        },
+    ) {
+        Ok(session) => session,
+        Err(_) => return render_check_output(&analysis, false),
+    };
+    let program = match lower_to_core(&session) {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: render_diagnostics(&session.analysis, &diagnostics),
+                exit_code: ExitCode::FAILURE,
+            });
+        }
+    };
+    let modules = emit_javascript_modules(&program);
+
+    if let Some(out_dir) = &options.out_dir {
+        for module in &modules {
+            let path = out_dir.join(&module.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create `{}`", parent.display()))?;
+            }
+            fs::write(&path, &module.source)
+                .with_context(|| format!("failed to write `{}`", path.display()))?;
+        }
+        return Ok(CommandOutput {
+            stdout: format!(
+                "fx compile: wrote {} JavaScript module(s) to {}\n",
+                modules.len(),
+                out_dir.display()
+            ),
+            stderr: String::new(),
+            exit_code: ExitCode::SUCCESS,
+        });
+    }
+
+    let mut stdout = String::new();
+    for module in modules {
+        stdout.push_str(&format!("// file: {}\n", module.path));
+        stdout.push_str(&module.source);
+        if !stdout.ends_with('\n') {
+            stdout.push('\n');
+        }
+    }
+    Ok(CommandOutput {
+        stdout,
+        stderr: String::new(),
+        exit_code: ExitCode::SUCCESS,
+    })
 }
 
 fn render_check_output(analysis: &Analysis, json: bool) -> Result<CommandOutput> {
@@ -408,9 +531,100 @@ mod tests {
     }
 
     #[test]
+    fn compile_options_require_target() {
+        let error = CompileCliOptions::parse(vec!["src".to_string()]).expect_err("target error");
+
+        assert!(error.to_string().contains("requires `--target js`"));
+    }
+
+    #[test]
+    fn compile_options_reject_unknown_targets() {
+        let error = CompileCliOptions::parse(vec![
+            "--target".to_string(),
+            "c".to_string(),
+            "src".to_string(),
+        ])
+        .expect_err("target error");
+
+        assert!(error.to_string().contains("unknown compile target `c`"));
+    }
+
+    #[test]
+    fn compile_stdout_emits_javascript() {
+        let output = compile_output(&CompileCliOptions {
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/phase-2.5"),
+            target: CompileTarget::JavaScript,
+            out_dir: None,
+        })
+        .expect("compile output");
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("// file: main.mjs"));
+        assert!(output.stdout.contains("export function __fx_user_main()"));
+    }
+
+    #[test]
+    fn compile_rejects_diagnostics_before_emitting() {
+        let dir = temp_dir("fx-cli-compile-bad");
+        fs::write(dir.join("bad.fx"), "bad() : Int\n  missing\n").expect("write bad file");
+
+        let output = compile_output(&CompileCliOptions {
+            path: dir.clone(),
+            target: CompileTarget::JavaScript,
+            out_dir: Some(dir.join("out")),
+        })
+        .expect("compile output");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("unknown name `missing`"));
+    }
+
+    #[test]
+    fn compile_out_dir_outputs_executable_phase_2_5_modules() {
+        let dir = temp_dir("fx-cli-compile-out");
+        let out_dir = dir.join("out");
+        let output = compile_output(&CompileCliOptions {
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/phase-2.5"),
+            target: CompileTarget::JavaScript,
+            out_dir: Some(out_dir.clone()),
+        })
+        .expect("compile output");
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("wrote 3 JavaScript module"));
+        assert!(out_dir.join("main.mjs").exists());
+
+        let node = std::process::Command::new("node")
+            .arg("-e")
+            .arg(format!(
+                "import('{}/main.mjs').then((m) => console.log(m.__fx_user_main()))",
+                out_dir.display()
+            ))
+            .output()
+            .expect("node runs compiled output");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            node.status.success(),
+            "node failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&node.stdout),
+            String::from_utf8_lossy(&node.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(node.stdout).expect("utf8 stdout").trim(),
+            "Hello, Grace!! phase 2.5"
+        );
+    }
+
+    #[test]
     fn collect_check_files_accepts_single_file() {
-        let dir = std::env::temp_dir().join(format!("fx-cli-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = temp_dir("fx-cli-test");
         let file = dir.join("single.fx");
         fs::write(&file, "ok() : Int\n  1\n").expect("write temp file");
 
@@ -420,6 +634,8 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, file);
         assert_eq!(files[0].source, "ok() : Int\n  1\n");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn analysis_with_source(path: &str, source_text: &str) -> Analysis {
@@ -431,5 +647,19 @@ mod tests {
             path: PathBuf::from(path),
             source: source_text.to_string(),
         }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{}-{}-{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 }
