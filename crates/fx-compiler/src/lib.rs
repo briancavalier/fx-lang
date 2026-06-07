@@ -1,10 +1,12 @@
 use fx_core::{Analysis, AnalysisDiagnostic};
 
 pub mod ir;
+pub mod js;
 pub mod lower;
 pub mod runtime;
 
 pub use ir::*;
+pub use js::*;
 pub use lower::*;
 pub use runtime::*;
 
