@@ -1,5 +1,9 @@
 use fx_core::{Analysis, AnalysisDiagnostic};
 
+pub mod ir;
+
+pub use ir::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompileTarget {
     JavaScript,

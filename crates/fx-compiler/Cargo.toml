@@ -6,3 +6,4 @@ version.workspace = true
 
 [dependencies]
 fx-core.workspace = true
+fx-syntax.workspace = true
