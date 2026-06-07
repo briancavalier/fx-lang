@@ -71,15 +71,28 @@ cargo run -q -p fx-cli -- check examples/phase-2/rows.fx
 
 ## Phase 2.5
 
-Phase 2.5 examples are expected to parse and check successfully. They are
-executable-shaped fixtures for the future compiler path:
+Phase 2.5 examples are expected to parse, check, compile, and execute through
+the JavaScript compiler path:
 
 - `phase-2.5/domain.fx`
 - `phase-2.5/functions.fx`
 - `phase-2.5/main.fx`
 
-Try all Phase 2.5 examples:
+Check all Phase 2.5 examples:
 
 ```sh
 cargo run -q -p fx-cli -- check examples/phase-2.5
+```
+
+Compile all Phase 2.5 examples to JavaScript:
+
+```sh
+cargo run -q -p fx-cli -- compile --target js examples/phase-2.5
+```
+
+Write executable ESM files for Node:
+
+```sh
+cargo run -q -p fx-cli -- compile --target js --out-dir /tmp/fxl-phase-2.5 examples/phase-2.5
+node -e "import('/tmp/fxl-phase-2.5/main.mjs').then((m) => console.log(m.__fx_user_main()))"
 ```
