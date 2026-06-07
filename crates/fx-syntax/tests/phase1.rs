@@ -176,6 +176,19 @@ fn parses_phase_2_rows_goal_fixture() {
 }
 
 #[test]
+fn parses_phase_2_5_executable_fixtures() {
+    for source in [
+        include_str!("../../../examples/phase-2.5/domain.fx"),
+        include_str!("../../../examples/phase-2.5/functions.fx"),
+        include_str!("../../../examples/phase-2.5/main.fx"),
+    ] {
+        let parsed = parse_file(source);
+
+        assert_eq!(parsed.diagnostics, []);
+    }
+}
+
+#[test]
 fn parses_match_with_list_rest_pattern() {
     let parsed = parse_file(
         r#"head(xs: List Int) : Int

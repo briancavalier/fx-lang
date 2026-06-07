@@ -1239,6 +1239,34 @@ fn checker_runs_on_phase_2_examples() {
 }
 
 #[test]
+fn checker_runs_on_phase_2_5_examples() {
+    let graph = phase_2_5_graph();
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn resolves_phase_2_5_imported_symbols() {
+    let graph = phase_2_5_graph();
+    let resolved = resolve_workspace(&graph);
+
+    assert_eq!(resolved.diagnostics, []);
+    let main = resolved.modules.get("main").expect("main module");
+    let imported_targets = main
+        .references
+        .iter()
+        .map(|reference| reference.target.qualified_name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(imported_targets.contains(&"domain.mark-done"));
+    assert!(imported_targets.contains(&"domain.find-person"));
+    assert!(imported_targets.contains(&"domain.render"));
+    assert!(imported_targets.contains(&"functions.decorate"));
+    assert!(imported_targets.contains(&"functions.computed"));
+}
+
+#[test]
 fn reports_unknown_open_variant_pattern_constructors() {
     let result = check_single(
         "variant.fx",
@@ -2177,6 +2205,26 @@ fn analyze_single(path: &str, source_text: &str) -> fx_core::Analysis {
     analyze_workspace(
         &PathBuf::from("examples/phase-1"),
         vec![source(&format!("examples/phase-1/{path}"), source_text)],
+    )
+}
+
+fn phase_2_5_graph() -> fx_core::ModuleGraph {
+    index_workspace(
+        &PathBuf::from("examples/phase-2.5"),
+        vec![
+            SourceFile {
+                path: PathBuf::from("examples/phase-2.5/domain.fx"),
+                source: include_str!("../../../examples/phase-2.5/domain.fx").to_string(),
+            },
+            SourceFile {
+                path: PathBuf::from("examples/phase-2.5/functions.fx"),
+                source: include_str!("../../../examples/phase-2.5/functions.fx").to_string(),
+            },
+            SourceFile {
+                path: PathBuf::from("examples/phase-2.5/main.fx"),
+                source: include_str!("../../../examples/phase-2.5/main.fx").to_string(),
+            },
+        ],
     )
 }
 

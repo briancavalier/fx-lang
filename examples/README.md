@@ -68,3 +68,18 @@ Try a single file:
 ```sh
 cargo run -q -p fx-cli -- check examples/phase-2/rows.fx
 ```
+
+## Phase 2.5
+
+Phase 2.5 examples are expected to parse and check successfully. They are
+executable-shaped fixtures for the future compiler path:
+
+- `phase-2.5/domain.fx`
+- `phase-2.5/functions.fx`
+- `phase-2.5/main.fx`
+
+Try all Phase 2.5 examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-2.5
+```
