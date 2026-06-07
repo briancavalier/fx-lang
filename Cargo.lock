@@ -176,6 +176,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fx-compiler"
+version = "0.1.0"
+dependencies = [
+ "fx-core",
+]
+
+[[package]]
 name = "fx-core"
 version = "0.1.0"
 dependencies = [
