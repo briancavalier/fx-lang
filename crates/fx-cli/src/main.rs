@@ -584,6 +584,31 @@ mod tests {
     }
 
     #[test]
+    fn compile_reports_compiler_unsupported_diagnostics_before_emitting() {
+        let dir = temp_dir("fx-cli-compile-unsupported");
+        fs::write(
+            dir.join("tuple.fx"),
+            "type Pair = (Int, Text)\n\nvalue() : Int\n  1\n",
+        )
+        .expect("write unsupported file");
+
+        let output = compile_output(&CompileCliOptions {
+            path: dir.clone(),
+            target: CompileTarget::JavaScript,
+            out_dir: Some(dir.join("out")),
+        })
+        .expect("compile output");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("tuple.fx:1:13: error: Phase 2.5 compiler unsupported: only record and variant type declarations are executable in Phase 2.5"));
+        assert!(output.stderr.contains("type Pair = (Int, Text)"));
+        assert!(output.stderr.contains("^"));
+    }
+
+    #[test]
     fn compile_out_dir_outputs_executable_phase_2_5_modules() {
         let dir = temp_dir("fx-cli-compile-out");
         let out_dir = dir.join("out");

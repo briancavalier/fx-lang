@@ -598,7 +598,11 @@ impl ModuleLowerer<'_, '_> {
     }
 
     fn unsupported(&mut self, span: Span, message: impl Into<String>) {
-        self.parent.diagnostic(self.module, span, message);
+        self.parent.diagnostic(
+            self.module,
+            span,
+            format!("Phase 2.5 compiler unsupported: {}", message.into()),
+        );
     }
 }
 
@@ -748,11 +752,25 @@ mod tests {
 
         let diagnostics = lower_to_core(&session).expect_err("compiler diagnostics");
 
-        assert!(diagnostics.iter().any(|diagnostic| {
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("only record and variant type declarations are executable")
+            })
+            .expect("unsupported type declaration diagnostic");
+
+        assert!(
             diagnostic
                 .message
-                .contains("only record and variant type declarations are executable")
-        }));
+                .starts_with("Phase 2.5 compiler unsupported:")
+        );
+        assert_eq!(
+            diagnostic.path,
+            PathBuf::from("examples/phase-2.5/tuple.fx")
+        );
+        assert!(diagnostic.span.start < diagnostic.span.end);
     }
 
     fn phase_2_5_session() -> crate::CompileSession {
