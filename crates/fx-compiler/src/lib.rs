@@ -2,9 +2,11 @@ use fx_core::{Analysis, AnalysisDiagnostic};
 
 pub mod ir;
 pub mod lower;
+pub mod runtime;
 
 pub use ir::*;
 pub use lower::*;
+pub use runtime::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompileTarget {
