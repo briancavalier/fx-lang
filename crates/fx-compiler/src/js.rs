@@ -1,4 +1,5 @@
 use crate::ir::*;
+use crate::runtime::javascript_runtime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaScriptModule {
@@ -48,10 +49,16 @@ fn emit_module(module: &CoreModule) -> String {
         source.push('\n');
     }
 
+    source.push_str(javascript_runtime());
+    source.push('\n');
+
     for declaration in &module.declarations {
         match declaration {
             CoreDecl::Type(declaration) => emit_type_decl(&mut source, declaration),
-            CoreDecl::Value(declaration) => emit_value_decl(&mut source, declaration),
+            CoreDecl::Value(declaration) => {
+                let mut emitter = ExprEmitter::new(&module.name);
+                emit_value_decl(&mut source, declaration, &mut emitter);
+            }
         }
     }
 
@@ -86,17 +93,289 @@ fn emit_type_decl(source: &mut String, declaration: &CoreTypeDecl) {
         display_global(&declaration.name),
         shape
     ));
+    if let CoreTypeShape::Variant { cases } = &declaration.shape {
+        for case in cases {
+            let name = global_identifier(&CoreGlobalName {
+                module: declaration.name.module.clone(),
+                name: case.name.clone(),
+            });
+            if declaration.export {
+                source.push_str("export ");
+            }
+            let params = (0..case.payload.len())
+                .map(|index| format!("__fx_payload_{index}"))
+                .collect::<Vec<_>>();
+            source.push_str(&format!(
+                "function {name}({}) {{ return __fx.variant({}, {}); }}\n",
+                params.join(", "),
+                string_literal(&case.name),
+                params.join(", ")
+            ));
+        }
+    }
 }
 
-fn emit_value_decl(source: &mut String, declaration: &CoreValueDecl) {
+fn emit_value_decl(
+    source: &mut String,
+    declaration: &CoreValueDecl,
+    emitter: &mut ExprEmitter<'_>,
+) {
     let name = global_identifier(&declaration.name);
     if declaration.export {
         source.push_str("export ");
     }
+    let params = declaration
+        .params
+        .iter()
+        .map(|param| local_identifier(&param.name))
+        .collect::<Vec<_>>();
+    let body = emitter.expr(&declaration.body);
     source.push_str(&format!(
-        "function {name}() {{ throw new Error(\"fx codegen for {} is not implemented yet\"); }}\n",
-        display_global(&declaration.name)
+        "function {name}({}) {{ return {body}; }}\n",
+        params.join(", ")
     ));
+}
+
+struct ExprEmitter<'a> {
+    module: &'a str,
+    next_temp: usize,
+}
+
+struct PatternResult {
+    condition: String,
+    bindings: Vec<String>,
+}
+
+impl<'a> ExprEmitter<'a> {
+    fn new(module: &'a str) -> Self {
+        Self {
+            module,
+            next_temp: 0,
+        }
+    }
+
+    fn expr(&mut self, expr: &CoreExpr) -> String {
+        match &expr.kind {
+            CoreExprKind::Unit => "undefined".to_string(),
+            CoreExprKind::Bool(value) => value.to_string(),
+            CoreExprKind::Int(value) => value.to_string(),
+            CoreExprKind::Text(value) => string_literal(value),
+            CoreExprKind::Local(name) => local_identifier(name),
+            CoreExprKind::Global(name) => self.global_ref(name),
+            CoreExprKind::Let { name, value, body } => format!(
+                "(() => {{ const {} = {}; return {}; }})()",
+                local_identifier(name),
+                self.expr(value),
+                self.expr(body)
+            ),
+            CoreExprKind::Lambda { params, body } => format!(
+                "(({}) => {})",
+                params
+                    .iter()
+                    .map(|param| local_identifier(&param.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.expr(body)
+            ),
+            CoreExprKind::Call { callee, args } => format!(
+                "{}({})",
+                self.expr(callee),
+                args.iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CoreExprKind::Record { fields } => self.record(fields),
+            CoreExprKind::Field { target, field } => {
+                format!("{}[{}]", self.expr(target), string_literal(field))
+            }
+            CoreExprKind::RecordUpdate { base, fields } => {
+                let updates = fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "[{}]: {}",
+                            string_literal(&field.name),
+                            self.expr(&field.value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({{ ...{}, {} }})", self.expr(base), updates)
+            }
+            CoreExprKind::Variant { constructor, args } => format!(
+                "{}({})",
+                self.global_ref(constructor),
+                args.iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CoreExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => format!(
+                "({} ? {} : {})",
+                self.expr(condition),
+                self.expr(then_branch),
+                self.expr(else_branch)
+            ),
+            CoreExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms),
+            CoreExprKind::List(items) => format!(
+                "__fx.list({})",
+                items
+                    .iter()
+                    .map(|item| self.expr(item))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CoreExprKind::Binary { op, left, right } => match op {
+                CoreBinaryOp::Equal => {
+                    format!("__fx.equal({}, {})", self.expr(left), self.expr(right))
+                }
+                CoreBinaryOp::Concat | CoreBinaryOp::Add => {
+                    format!("({} + {})", self.expr(left), self.expr(right))
+                }
+                CoreBinaryOp::Subtract => format!("({} - {})", self.expr(left), self.expr(right)),
+            },
+        }
+    }
+
+    fn record(&mut self, fields: &[CoreRecordField]) -> String {
+        let fields = fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "[{}]: {}",
+                    string_literal(&field.name),
+                    self.expr(&field.value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("({{ {fields} }})")
+    }
+
+    fn match_expr(&mut self, scrutinee: &CoreExpr, arms: &[CoreMatchArm]) -> String {
+        let value = self.temp("match");
+        let mut output = format!("(() => {{ const {value} = {}; ", self.expr(scrutinee));
+        for arm in arms {
+            let PatternResult {
+                condition,
+                bindings,
+            } = self.pattern(&arm.pattern, &value);
+            output.push_str(&format!("if ({condition}) {{ "));
+            for binding in bindings {
+                output.push_str(&binding);
+                output.push(' ');
+            }
+            output.push_str(&format!("return {}; }} ", self.expr(&arm.value)));
+        }
+        output.push_str("throw new Error(\"fx match exhausted\"); })()");
+        output
+    }
+
+    fn pattern(&mut self, pattern: &CorePattern, value: &str) -> PatternResult {
+        match &pattern.kind {
+            CorePatternKind::Wildcard => PatternResult {
+                condition: "true".to_string(),
+                bindings: Vec::new(),
+            },
+            CorePatternKind::Binder(name) => PatternResult {
+                condition: "true".to_string(),
+                bindings: vec![format!("const {} = {value};", local_identifier(name))],
+            },
+            CorePatternKind::Int(value_pattern) => PatternResult {
+                condition: format!("__fx.equal({value}, {value_pattern})"),
+                bindings: Vec::new(),
+            },
+            CorePatternKind::Text(value_pattern) => PatternResult {
+                condition: format!("__fx.equal({value}, {})", string_literal(value_pattern)),
+                bindings: Vec::new(),
+            },
+            CorePatternKind::Bool(value_pattern) => PatternResult {
+                condition: format!("__fx.equal({value}, {value_pattern})"),
+                bindings: Vec::new(),
+            },
+            CorePatternKind::Unit => PatternResult {
+                condition: format!("__fx.equal({value}, undefined)"),
+                bindings: Vec::new(),
+            },
+            CorePatternKind::List { items, rest } => {
+                let mut conditions = vec![format!("Array.isArray({value})")];
+                if rest.is_some() {
+                    conditions.push(format!("{value}.length >= {}", items.len()));
+                } else {
+                    conditions.push(format!("{value}.length === {}", items.len()));
+                }
+                let mut bindings = Vec::new();
+                for (index, item) in items.iter().enumerate() {
+                    let item_result = self.pattern(item, &format!("{value}[{index}]"));
+                    conditions.push(item_result.condition);
+                    bindings.extend(item_result.bindings);
+                }
+                if let Some(rest) = rest {
+                    bindings.push(format!(
+                        "const {} = Object.freeze({value}.slice({}));",
+                        local_identifier(rest),
+                        items.len()
+                    ));
+                }
+                PatternResult {
+                    condition: conditions.join(" && "),
+                    bindings,
+                }
+            }
+            CorePatternKind::Record { fields } => PatternResult {
+                condition: format!("{value} !== null && typeof {value} === \"object\""),
+                bindings: fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "const {} = {value}[{}];",
+                            local_identifier(field),
+                            string_literal(&field.0)
+                        )
+                    })
+                    .collect(),
+            },
+            CorePatternKind::Constructor { constructor, args } => {
+                let mut conditions = vec![
+                    format!(
+                        "__fx.isVariant({value}, {})",
+                        string_literal(&constructor.name)
+                    ),
+                    format!("{value}.payload.length === {}", args.len()),
+                ];
+                let mut bindings = Vec::new();
+                for (index, arg) in args.iter().enumerate() {
+                    let arg_result = self.pattern(arg, &format!("{value}.payload[{index}]"));
+                    conditions.push(arg_result.condition);
+                    bindings.extend(arg_result.bindings);
+                }
+                PatternResult {
+                    condition: conditions.join(" && "),
+                    bindings,
+                }
+            }
+        }
+    }
+
+    fn global_ref(&self, name: &CoreGlobalName) -> String {
+        let identifier = global_identifier(name);
+        if name.module == self.module {
+            identifier
+        } else {
+            format!("{}.{}", import_namespace(&name.module), identifier)
+        }
+    }
+
+    fn temp(&mut self, label: &str) -> String {
+        let index = self.next_temp;
+        self.next_temp += 1;
+        format!("__fx_{label}_{index}")
+    }
 }
 
 fn user_identifier(name: &str) -> String {
@@ -138,6 +417,27 @@ fn relative_import_path(from: &str, to: &str) -> String {
     path
 }
 
+fn string_literal(value: &str) -> String {
+    let mut output = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            other if other.is_control() => {
+                output.push_str("\\u{");
+                output.push_str(&(other as u32).to_string());
+                output.push('}');
+            }
+            other => output.push(other),
+        }
+    }
+    output.push('"');
+    output
+}
+
 fn is_ident_start(ch: char) -> bool {
     ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
 }
@@ -153,9 +453,12 @@ fn display_global(name: &CoreGlobalName) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CompileOptions, lower_to_core, prepare_compile};
     use fx_core::Type;
+    use fx_core::{SourceFile, analyze_workspace};
     use fx_syntax::span::Span;
     use std::fs;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -166,14 +469,17 @@ mod tests {
         assert_eq!(modules[0].path, "domain.mjs");
         assert_eq!(modules[1].path, "main.mjs");
         assert_eq!(
-            modules[1].source,
-            concat!(
-                "// Generated by fx Phase 2.5 JavaScript emitter.\n",
-                "// module main\n",
-                "import * as __fx_import_domain from \"./domain.mjs\";\n",
-                "\n",
-                "export function __fx_user_main() { throw new Error(\"fx codegen for main.main is not implemented yet\"); }\n",
-            )
+            modules[1]
+                .source
+                .lines()
+                .filter(|line| line.starts_with("import "))
+                .collect::<Vec<_>>(),
+            vec!["import * as __fx_import_domain from \"./domain.mjs\";"]
+        );
+        assert!(
+            modules[1]
+                .source
+                .contains("export function __fx_user_main() { return \"stub\"; }")
         );
     }
 
@@ -203,13 +509,7 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
 
-        for module in emit_javascript_modules(&sample_program()) {
-            let path = dir.join(module.path);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("create module dir");
-            }
-            fs::write(path, module.source).expect("write module");
-        }
+        write_modules(&dir, emit_javascript_modules(&sample_program()));
 
         let output = Command::new("node")
             .arg("-e")
@@ -233,6 +533,118 @@ mod tests {
                 .expect("utf8 stdout")
                 .trim(),
             "function"
+        );
+    }
+
+    #[test]
+    fn generated_phase_2_5_javascript_executes_under_node() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples/phase-2.5"),
+            vec![
+                source(
+                    "examples/phase-2.5/domain.fx",
+                    include_str!("../../../examples/phase-2.5/domain.fx"),
+                ),
+                source(
+                    "examples/phase-2.5/functions.fx",
+                    include_str!("../../../examples/phase-2.5/functions.fx"),
+                ),
+                source(
+                    "examples/phase-2.5/main.fx",
+                    include_str!("../../../examples/phase-2.5/main.fx"),
+                ),
+            ],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+        let program = lower_to_core(&session).expect("core program");
+        let dir = temp_dir("fx-js-phase-2-5");
+        write_modules(&dir, emit_javascript_modules(&program));
+
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(format!(
+                "import('{}/main.mjs').then((m) => console.log(m.__fx_user_main()))",
+                dir.display()
+            ))
+            .output()
+            .expect("node executes phase 2.5 generated js");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "node failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .expect("utf8 stdout")
+                .trim(),
+            "Hello, Grace!! phase 2.5"
+        );
+    }
+
+    #[test]
+    fn generated_phase_1_and_phase_2_modules_load_under_node() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples"),
+            vec![
+                source(
+                    "examples/phase-1/todo.fx",
+                    include_str!("../../../examples/phase-1/todo.fx"),
+                ),
+                source(
+                    "examples/phase-1/record-update.fx",
+                    include_str!("../../../examples/phase-1/record-update.fx"),
+                ),
+                source(
+                    "examples/phase-1/lambda.fx",
+                    include_str!("../../../examples/phase-1/lambda.fx"),
+                ),
+                source(
+                    "examples/phase-1/patterns.fx",
+                    include_str!("../../../examples/phase-1/patterns.fx"),
+                ),
+                source(
+                    "examples/phase-1/operators.fx",
+                    include_str!("../../../examples/phase-1/operators.fx"),
+                ),
+                source(
+                    "examples/phase-2/rows.fx",
+                    include_str!("../../../examples/phase-2/rows.fx"),
+                ),
+            ],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+        let program = lower_to_core(&session).expect("core program");
+        let dir = temp_dir("fx-js-phase-1-2");
+        write_modules(&dir, emit_javascript_modules(&program));
+
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(format!(
+                "Promise.all([import('{}/phase-1/todo.mjs'), import('{}/phase-1/operators.mjs'), import('{}/phase-2/rows.mjs')]).then(() => console.log('ok'))",
+                dir.display(),
+                dir.display(),
+                dir.display()
+            ))
+            .output()
+            .expect("node loads phase 1 and phase 2 generated js");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "node failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout)
+                .expect("utf8 stdout")
+                .trim(),
+            "ok"
         );
     }
 
@@ -293,6 +705,36 @@ mod tests {
             span: Span::point(0),
             tail: TailPosition::Tail,
             kind: CoreExprKind::Text("stub".to_string()),
+        }
+    }
+
+    fn source(path: &str, source: &str) -> SourceFile {
+        SourceFile {
+            path: PathBuf::from(path),
+            source: source.to_string(),
+        }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{}-{}",
+            prefix,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn write_modules(dir: &PathBuf, modules: Vec<JavaScriptModule>) {
+        for module in modules {
+            let path = dir.join(module.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create module dir");
+            }
+            fs::write(path, module.source).expect("write module");
         }
     }
 }
