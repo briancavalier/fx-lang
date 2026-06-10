@@ -148,6 +148,7 @@ impl ModuleResolver<'_> {
             match item {
                 Item::Import(_) => {}
                 Item::Type(decl) => self.resolve_type_decl(decl),
+                Item::Effect(_) => {}
                 Item::Value(decl) => self.resolve_value_decl(decl),
             }
         }
@@ -265,6 +266,32 @@ impl ModuleResolver<'_> {
                 }
                 self.resolve_block(body, &mut locals.clone());
             }
+            Expr::Handle {
+                action,
+                clauses,
+                return_clause,
+                ..
+            } => {
+                self.resolve_expr(action, locals);
+                for clause in clauses {
+                    self.resolve_symbol_reference(
+                        &clause.operation.text,
+                        clause.operation.span,
+                        Some(SymbolKind::Operation),
+                        false,
+                    );
+                    let mut clause_locals = locals.clone();
+                    for param in &clause.params {
+                        clause_locals.insert(param.text.clone());
+                    }
+                    self.resolve_block(&clause.body, &mut clause_locals);
+                }
+                if let Some(return_clause) = return_clause {
+                    let mut clause_locals = locals.clone();
+                    clause_locals.insert(return_clause.param.text.clone());
+                    self.resolve_block(&return_clause.body, &mut clause_locals);
+                }
+            }
             Expr::Binary { left, right, .. } => {
                 self.resolve_expr(left, locals);
                 self.resolve_expr(right, locals);
@@ -335,6 +362,14 @@ impl ModuleResolver<'_> {
                 }
                 self.resolve_type_expr(result, type_params);
             }
+            TypeExpr::Effect {
+                result, effects, ..
+            } => {
+                self.resolve_type_expr(result, type_params);
+                for effect in &effects.effects {
+                    self.resolve_effect_expr(effect, type_params);
+                }
+            }
             TypeExpr::Record { fields, .. } => {
                 for field in fields {
                     self.resolve_type_expr(&field.value, type_params);
@@ -353,6 +388,31 @@ impl ModuleResolver<'_> {
                 }
             }
             TypeExpr::Error { .. } => {}
+        }
+    }
+
+    fn resolve_effect_expr(&mut self, ty: &TypeExpr, type_params: &BTreeSet<String>) {
+        match ty {
+            TypeExpr::Named { path, span } => {
+                let name = path
+                    .iter()
+                    .map(|name| name.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                self.resolve_symbol_name(&name, *span, Some(SymbolKind::Effect));
+            }
+            TypeExpr::App { callee, args, .. } => {
+                self.resolve_effect_expr(callee, type_params);
+                for arg in args {
+                    self.resolve_type_expr(arg, type_params);
+                }
+            }
+            TypeExpr::Var(name) => {
+                if !type_params.contains(name.text.as_str()) {
+                    self.resolve_symbol_name(&name.text, name.span, Some(SymbolKind::Effect));
+                }
+            }
+            other => self.resolve_type_expr(other, type_params),
         }
     }
 
@@ -454,6 +514,14 @@ fn collect_type_vars(ty: &TypeExpr, vars: &mut BTreeSet<String>) {
             }
             collect_type_vars(result, vars);
         }
+        TypeExpr::Effect {
+            result, effects, ..
+        } => {
+            collect_type_vars(result, vars);
+            for effect in &effects.effects {
+                collect_type_vars(effect, vars);
+            }
+        }
         TypeExpr::Named { .. } | TypeExpr::Error { .. } => {}
     }
 }
@@ -466,6 +534,8 @@ fn describe_name(kind: Option<SymbolKind>, name: &str) -> String {
     match kind {
         Some(SymbolKind::Type) => format!("type `{name}`"),
         Some(SymbolKind::Constructor) => format!("constructor `{name}`"),
+        Some(SymbolKind::Effect) => format!("effect `{name}`"),
+        Some(SymbolKind::Operation) => format!("operation `{name}`"),
         Some(SymbolKind::Value) => format!("value `{name}`"),
         None => format!("name `{name}`"),
     }

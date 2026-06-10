@@ -284,6 +284,44 @@ fn local_definition_in_expr(
                 local_definition_in_expr(&target.target, byte_offset, locals, module)
             })
             .or_else(|| local_definition_in_block(body, byte_offset, &mut locals.clone(), module)),
+        Expr::Handle {
+            action,
+            clauses,
+            return_clause,
+            ..
+        } => local_definition_in_expr(action, byte_offset, locals, module)
+            .or_else(|| {
+                clauses.iter().find_map(|clause| {
+                    let mut clause_locals = locals.clone();
+                    for param in &clause.params {
+                        let definition = DefinitionInfo {
+                            module: module.name.clone(),
+                            path: module.path.clone(),
+                            span: param.span,
+                        };
+                        if contains_offset(param.span, byte_offset) {
+                            return Some(definition);
+                        }
+                        clause_locals.insert(param.text.clone(), definition);
+                    }
+                    local_definition_in_block(&clause.body, byte_offset, &mut clause_locals, module)
+                })
+            })
+            .or_else(|| {
+                return_clause.as_ref().and_then(|clause| {
+                    let mut clause_locals = locals.clone();
+                    let definition = DefinitionInfo {
+                        module: module.name.clone(),
+                        path: module.path.clone(),
+                        span: clause.param.span,
+                    };
+                    if contains_offset(clause.param.span, byte_offset) {
+                        return Some(definition);
+                    }
+                    clause_locals.insert(clause.param.text.clone(), definition);
+                    local_definition_in_block(&clause.body, byte_offset, &mut clause_locals, module)
+                })
+            }),
         Expr::Binary { left, right, .. } => {
             local_definition_in_expr(left, byte_offset, locals, module)
                 .or_else(|| local_definition_in_expr(right, byte_offset, locals, module))

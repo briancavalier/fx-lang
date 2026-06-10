@@ -24,6 +24,118 @@ fn indexes_phase_1_todo_symbols() {
 }
 
 #[test]
+fn indexes_effect_and_operation_symbols() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+effect Emit a
+  emit(value: a) : Unit
+"#
+            .to_string(),
+        }],
+    );
+
+    assert_eq!(graph.diagnostics, []);
+    let module = graph.modules.get("effects").expect("effects module");
+    let symbols = module
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol.kind, symbol.exported))
+        .collect::<Vec<_>>();
+
+    assert!(symbols.contains(&("Raise", SymbolKind::Effect, true)));
+    assert!(symbols.contains(&("raise", SymbolKind::Operation, true)));
+    assert!(symbols.contains(&("Emit", SymbolKind::Effect, false)));
+    assert!(symbols.contains(&("emit", SymbolKind::Operation, false)));
+}
+
+#[test]
+fn resolves_effect_row_names_to_effect_declarations() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![
+            SourceFile {
+                path: PathBuf::from("examples/phase-3/effects.fx"),
+                source: r#"export effect Raise
+  raise(message: Text) : a
+"#
+                .to_string(),
+            },
+            SourceFile {
+                path: PathBuf::from("examples/phase-3/use.fx"),
+                source: r#"import effects
+
+safe() : Int with <effects.Raise>
+  1
+"#
+                .to_string(),
+            },
+        ],
+    );
+    let resolved = resolve_workspace(&graph);
+
+    assert_eq!(resolved.diagnostics, []);
+    let module = resolved.modules.get("use").expect("use module");
+    assert!(module.references.iter().any(|reference| {
+        reference.name == "effects.Raise" && reference.target.kind == SymbolKind::Effect
+    }));
+}
+
+#[test]
+fn checks_effectful_operation_calls_against_declared_effect_rows() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+    let types = result.module_types.get("effects").expect("module types");
+    assert_eq!(
+        types.get("safe-divide").map(ToString::to_string),
+        Some("(Int, Int) -> Int with < Raise >".to_string())
+    );
+}
+
+#[test]
+fn reports_unhandled_effects_in_pure_annotations() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+bad() : Int
+  raise("bad")
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("unhandled effects < Raise >") })
+    );
+}
+
+#[test]
 fn checker_runs_on_phase_1_todo_fixture() {
     let graph = todo_graph();
     let result = check_workspace(&graph);

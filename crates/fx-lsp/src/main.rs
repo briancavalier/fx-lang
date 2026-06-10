@@ -382,6 +382,8 @@ fn lsp_symbol_kind(kind: FxSymbolKind) -> LspSymbolKind {
         FxSymbolKind::Value => LspSymbolKind::FUNCTION,
         FxSymbolKind::Type => LspSymbolKind::STRUCT,
         FxSymbolKind::Constructor => LspSymbolKind::CONSTRUCTOR,
+        FxSymbolKind::Effect => LspSymbolKind::INTERFACE,
+        FxSymbolKind::Operation => LspSymbolKind::FUNCTION,
     }
 }
 

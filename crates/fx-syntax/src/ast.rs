@@ -19,6 +19,7 @@ pub struct Module {
 pub enum Item {
     Import(ImportDecl),
     Type(TypeDecl),
+    Effect(EffectDecl),
     Value(ValueDecl),
 }
 
@@ -27,6 +28,7 @@ impl Item {
         match self {
             Item::Import(item) => item.span,
             Item::Type(item) => item.span,
+            Item::Effect(item) => item.span,
             Item::Value(item) => item.span,
         }
     }
@@ -44,6 +46,23 @@ pub struct TypeDecl {
     pub name: Name,
     pub params: Vec<Name>,
     pub body: TypeExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectDecl {
+    pub export: bool,
+    pub name: Name,
+    pub params: Vec<Name>,
+    pub operations: Vec<OperationDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationDecl {
+    pub name: Name,
+    pub params: Vec<Param>,
+    pub result: TypeExpr,
     pub span: Span,
 }
 
@@ -106,6 +125,11 @@ pub enum TypeExpr {
         result: Box<TypeExpr>,
         span: Span,
     },
+    Effect {
+        result: Box<TypeExpr>,
+        effects: EffectRow,
+        span: Span,
+    },
     Record {
         fields: Vec<FieldType>,
         tail: Option<RowTail>,
@@ -132,12 +156,20 @@ impl TypeExpr {
             | TypeExpr::Var(Name { span, .. })
             | TypeExpr::App { span, .. }
             | TypeExpr::Function { span, .. }
+            | TypeExpr::Effect { span, .. }
             | TypeExpr::Record { span, .. }
             | TypeExpr::Variant { span, .. }
             | TypeExpr::Tuple { span, .. }
             | TypeExpr::Error { span } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectRow {
+    pub effects: Vec<TypeExpr>,
+    pub tail: Option<RowTail>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -228,6 +260,12 @@ pub enum Expr {
         body: Block,
         span: Span,
     },
+    Handle {
+        action: Box<Expr>,
+        clauses: Vec<HandlerClause>,
+        return_clause: Option<HandlerReturnClause>,
+        span: Span,
+    },
     Binary {
         op: BinaryOp,
         op_span: Span,
@@ -258,6 +296,7 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::Pipeline { span, .. }
             | Expr::With { span, .. }
+            | Expr::Handle { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Error { span } => *span,
         }
@@ -267,6 +306,21 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WithTarget {
     pub target: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlerClause {
+    pub operation: Name,
+    pub params: Vec<Name>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandlerReturnClause {
+    pub param: Name,
+    pub body: Block,
     pub span: Span,
 }
 

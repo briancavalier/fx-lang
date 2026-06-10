@@ -201,6 +201,146 @@ fn parses_phase_2_6_pipeline_and_with_fixtures() {
 }
 
 #[test]
+fn parses_effect_declarations() {
+    let parsed = parse_file(
+        r#"export effect Raise
+  raise(message: Text) : a
+
+effect Emit a
+  emit(value: a) : Unit
+  done() : Unit
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Effect(raise) = &parsed.module.items[0] else {
+        panic!("expected effect declaration");
+    };
+    assert!(raise.export);
+    assert_eq!(raise.name.text, "Raise");
+    assert_eq!(raise.operations.len(), 1);
+    assert_eq!(raise.operations[0].name.text, "raise");
+    assert_eq!(raise.operations[0].params.len(), 1);
+
+    let Item::Effect(emit) = &parsed.module.items[1] else {
+        panic!("expected effect declaration");
+    };
+    assert!(!emit.export);
+    assert_eq!(emit.name.text, "Emit");
+    assert_eq!(emit.params.len(), 1);
+    assert_eq!(emit.operations.len(), 2);
+}
+
+#[test]
+fn parses_effect_rows_in_result_and_function_types() {
+    let parsed = parse_file(
+        r#"safe-divide(x: Int, y: Int) : Int with <Raise>
+  x
+
+catch(action: () -> a with <Raise, ...e>) : a with <...e>
+  action()
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(divide) = &parsed.module.items[0] else {
+        panic!("expected value declaration");
+    };
+    assert!(matches!(divide.annotation, TypeExpr::Effect { .. }));
+
+    let Item::Value(catch) = &parsed.module.items[1] else {
+        panic!("expected value declaration");
+    };
+    let TypeExpr::Function { result, .. } = &catch.params[0].annotation else {
+        panic!("expected function parameter type");
+    };
+    assert!(matches!(result.as_ref(), TypeExpr::Effect { .. }));
+    let TypeExpr::Effect { effects, .. } = &catch.annotation else {
+        panic!("expected effectful return type");
+    };
+    assert_eq!(effects.effects.len(), 0);
+    assert!(effects.tail.is_some());
+}
+
+#[test]
+fn reports_malformed_effect_row_tails() {
+    let parsed = parse_file(
+        r#"bad() : Int with <Raise, ...e, Other>
+  1
+
+also-bad() : Int with <Raise, ...e, ...f>
+  1
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("effect row spread must appear last")
+    }));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("duplicate effect row spread") })
+    );
+}
+
+#[test]
+fn parses_handle_expressions_with_operation_and_return_clauses() {
+    let parsed = parse_file(
+        r#"catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
+  handle action()
+    raise(message, resume) ->
+      default
+
+    return(value) ->
+      value
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value declaration");
+    };
+    let Expr::Handle {
+        action,
+        clauses,
+        return_clause,
+        ..
+    } = value.body.result.as_ref()
+    else {
+        panic!("expected handle expression");
+    };
+    assert!(matches!(action.as_ref(), Expr::Call { .. }));
+    assert_eq!(clauses.len(), 1);
+    assert_eq!(clauses[0].operation.text, "raise");
+    assert_eq!(clauses[0].params.len(), 2);
+    let return_clause = return_clause.as_ref().expect("expected return clause");
+    assert_eq!(return_clause.param.text, "value");
+}
+
+#[test]
+fn reports_malformed_effect_operation_signatures() {
+    let parsed = parse_file(
+        r#"effect Bad
+  missing-colon(value Text) Unit
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `:` after parameter name")
+    }));
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected operation result type annotation")
+    }));
+}
+
+#[test]
 fn parses_pipeline_as_left_associative_data_last_sugar() {
     let parsed = parse_file(
         r#"main() : Text

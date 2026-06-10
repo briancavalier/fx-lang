@@ -43,6 +43,8 @@ pub enum SymbolKind {
     Value,
     Type,
     Constructor,
+    Effect,
+    Operation,
 }
 
 pub fn index_workspace(root: &Path, files: Vec<SourceFile>) -> ModuleGraph {
@@ -135,6 +137,36 @@ fn index_module(module: &str, ast: &Module) -> (Vec<Symbol>, Vec<String>, Vec<Di
                             },
                         );
                     }
+                }
+            }
+            Item::Effect(decl) => {
+                add_symbol(
+                    &mut symbols,
+                    &mut seen,
+                    &mut diagnostics,
+                    Symbol {
+                        module: module.to_string(),
+                        name: decl.name.text.clone(),
+                        qualified_name: format!("{module}.{}", decl.name.text),
+                        kind: SymbolKind::Effect,
+                        exported: decl.export,
+                        span: decl.name.span,
+                    },
+                );
+                for operation in &decl.operations {
+                    add_symbol(
+                        &mut symbols,
+                        &mut seen,
+                        &mut diagnostics,
+                        Symbol {
+                            module: module.to_string(),
+                            name: operation.name.text.clone(),
+                            qualified_name: format!("{module}.{}", operation.name.text),
+                            kind: SymbolKind::Operation,
+                            exported: decl.export,
+                            span: operation.name.span,
+                        },
+                    );
                 }
             }
             Item::Value(decl) => add_symbol(

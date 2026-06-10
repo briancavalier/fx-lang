@@ -123,3 +123,23 @@ Write executable ESM files for Node:
 cargo run -q -p fx-cli -- compile --target js --out-dir /tmp/fxl-phase-2.6 examples/phase-2.6
 node -e "import('/tmp/fxl-phase-2.6/main.mjs').then((m) => console.log(m.__fx_user_main()))"
 ```
+
+## Phase 3
+
+Phase 3 examples are goal targets for ordinary algebraic effects. They are not
+expected to parse or check successfully until Phase 3 support lands:
+
+- `phase-3/effects.fx`
+- `phase-3/imported.fx`
+- `phase-3/resume.fx`
+
+Once Phase 3 support lands, check all Phase 3 examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-3
+```
+
+JavaScript execution for effectful programs belongs to Phase 3.1. Until then,
+`fx compile --target js` should continue compiling pure earlier-phase programs
+and reject effectful Phase 3 programs with a clear unsupported-effect-runtime
+compiler diagnostic.

@@ -56,11 +56,13 @@ impl Parser {
             Some(Item::Import(self.import_decl()))
         } else if self.at_keyword(Keyword::Type) {
             Some(Item::Type(self.type_decl(export)))
+        } else if self.at_keyword(Keyword::Effect) {
+            Some(Item::Effect(self.effect_decl(export)))
         } else if self.is_later_phase_keyword() {
             let span = self.bump().span;
             self.diagnostics.push(Diagnostic::new(
                 span,
-                "this syntax belongs to a later phase and is not supported in Phase 1",
+                "this syntax belongs to a later phase and is not supported yet",
             ));
             None
         } else if matches!(self.peek().kind, TokenKind::Ident(_)) {
@@ -126,12 +128,87 @@ impl Parser {
         }
     }
 
+    fn effect_decl(&mut self, export: bool) -> EffectDecl {
+        let start = self
+            .expect_keyword(Keyword::Effect, "expected `effect`")
+            .start;
+        let name = self
+            .expect_ident("expected effect name")
+            .unwrap_or_else(|| error_name(start));
+        let mut params = Vec::new();
+        while matches!(self.peek().kind, TokenKind::Ident(_)) {
+            if let Some(param) = self.expect_ident("expected effect type parameter") {
+                params.push(param);
+            }
+        }
+        self.expect_newline("expected newline before effect operations");
+        self.expect(TokenKind::Indent, "expected indented effect operations");
+        let mut operations = Vec::new();
+        self.skip_newlines();
+        while !self.at(TokenKind::Dedent) && !self.at(TokenKind::Eof) {
+            operations.push(self.operation_decl());
+            self.skip_newlines();
+        }
+        let end = self
+            .expect(TokenKind::Dedent, "expected end of effect declaration")
+            .end;
+        EffectDecl {
+            export,
+            name,
+            params,
+            operations,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn operation_decl(&mut self) -> OperationDecl {
+        let start = self.peek().span.start;
+        let name = self
+            .expect_ident("expected operation name")
+            .unwrap_or_else(|| error_name(start));
+        let params = self.param_list("operation");
+        self.expect(
+            TokenKind::Colon,
+            "expected operation result type annotation",
+        );
+        let result = self.type_expr();
+        let span = Span::new(start, result.span().end);
+        OperationDecl {
+            name,
+            params,
+            result,
+            span,
+        }
+    }
+
     fn value_decl(&mut self, export: bool) -> ValueDecl {
         let start = self.peek().span.start;
         let name = self
             .expect_ident("expected function name")
             .unwrap_or_else(|| error_name(start));
-        self.expect(TokenKind::LParen, "expected `(` after function name");
+        let params = self.param_list("function");
+        self.expect(TokenKind::Colon, "expected return type annotation");
+        let annotation = self.type_expr();
+        self.expect_newline("expected newline before function body");
+        self.expect(TokenKind::Indent, "expected indented function body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of function body");
+        let span = Span::new(start, body.span.end);
+        ValueDecl {
+            export,
+            name,
+            params,
+            annotation,
+            body,
+            span,
+        }
+    }
+
+    fn param_list(&mut self, owner: &str) -> Vec<Param> {
+        self.expect(
+            TokenKind::LParen,
+            &format!("expected `(` after {owner} name"),
+        );
         let mut params = Vec::new();
         if !self.at(TokenKind::RParen) {
             loop {
@@ -153,21 +230,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RParen, "expected `)` after parameters");
-        self.expect(TokenKind::Colon, "expected return type annotation");
-        let annotation = self.type_expr();
-        self.expect_newline("expected newline before function body");
-        self.expect(TokenKind::Indent, "expected indented function body");
-        let body = self.block();
-        self.expect(TokenKind::Dedent, "expected end of function body");
-        let span = Span::new(start, body.span.end);
-        ValueDecl {
-            export,
-            name,
-            params,
-            annotation,
-            body,
-            span,
-        }
+        params
     }
 
     fn block(&mut self) -> Block {
@@ -304,6 +367,7 @@ impl Parser {
         match self.peek().kind.clone() {
             TokenKind::Keyword(Keyword::If) => self.if_expr(),
             TokenKind::Keyword(Keyword::Match) => self.match_expr(),
+            TokenKind::Keyword(Keyword::Handle) => self.handle_expr(),
             TokenKind::Keyword(Keyword::True) => {
                 let span = self.bump().span;
                 Expr::Bool { value: true, span }
@@ -365,6 +429,111 @@ impl Parser {
             targets,
             body,
             span,
+        }
+    }
+
+    fn handle_expr(&mut self) -> Expr {
+        let start = self
+            .expect_keyword(Keyword::Handle, "expected `handle`")
+            .start;
+        let action = self.expr();
+        self.expect_newline("expected newline before handler clauses");
+        self.expect(TokenKind::Indent, "expected indented handler clauses");
+        let mut clauses = Vec::new();
+        let mut return_clause = None;
+        self.skip_newlines();
+        while !self.at(TokenKind::Dedent) && !self.at(TokenKind::Eof) {
+            let clause_start = self.peek().span.start;
+            let name = self
+                .expect_ident("expected handler clause name")
+                .unwrap_or_else(|| error_name(clause_start));
+            if name.text == "return" {
+                if return_clause.is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        name.span,
+                        "duplicate handler return clause",
+                    ));
+                }
+                let clause = self.handler_return_clause(name);
+                return_clause = Some(clause);
+            } else {
+                clauses.push(self.handler_operation_clause(name));
+            }
+            self.skip_newlines();
+        }
+        let end = self
+            .expect(TokenKind::Dedent, "expected end of handler clauses")
+            .end;
+        Expr::Handle {
+            action: Box::new(action),
+            clauses,
+            return_clause,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn handler_operation_clause(&mut self, operation: Name) -> HandlerClause {
+        let params = self.handler_param_list();
+        self.expect(TokenKind::Arrow, "expected `->` in handler clause");
+        let body = self.handler_clause_body("expected newline after handler clause arrow");
+        let span = operation.span.join(body.span);
+        HandlerClause {
+            operation,
+            params,
+            body,
+            span,
+        }
+    }
+
+    fn handler_return_clause(&mut self, return_name: Name) -> HandlerReturnClause {
+        let params = self.handler_param_list();
+        let param = params
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| error_name(return_name.span.end));
+        self.expect(TokenKind::Arrow, "expected `->` in handler return clause");
+        let body = self.handler_clause_body("expected newline after handler return arrow");
+        let span = return_name.span.join(body.span);
+        HandlerReturnClause { param, body, span }
+    }
+
+    fn handler_param_list(&mut self) -> Vec<Name> {
+        self.expect(TokenKind::LParen, "expected `(` after handler clause name");
+        let mut params = Vec::new();
+        if !self.at(TokenKind::RParen) {
+            loop {
+                let param_start = self.peek().span.start;
+                let param = self
+                    .expect_ident("expected handler clause parameter")
+                    .unwrap_or_else(|| error_name(param_start));
+                params.push(param);
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect(
+            TokenKind::RParen,
+            "expected `)` after handler clause parameters",
+        );
+        params
+    }
+
+    fn handler_clause_body(&mut self, newline_message: &str) -> Block {
+        if self.at(TokenKind::Newline) {
+            self.expect_newline(newline_message);
+            self.expect(TokenKind::Indent, "expected indented handler clause body");
+            let body = self.block();
+            self.expect(TokenKind::Dedent, "expected end of handler clause body");
+            body
+        } else {
+            let expr = self.expr();
+            let span = expr.span();
+            Block {
+                statements: Vec::new(),
+                result: Box::new(expr),
+                span,
+            }
         }
     }
 
@@ -709,7 +878,23 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> TypeExpr {
-        self.function_type()
+        self.effect_type()
+    }
+
+    fn effect_type(&mut self) -> TypeExpr {
+        let result = self.function_type();
+        if !self.at_keyword(Keyword::With) {
+            return result;
+        }
+        let start = result.span().start;
+        self.expect_keyword(Keyword::With, "expected `with` before effect row");
+        let effects = self.effect_row();
+        let span = Span::new(start, effects.span.end);
+        TypeExpr::Effect {
+            result: Box::new(result),
+            effects,
+            span,
+        }
     }
 
     fn function_type(&mut self) -> TypeExpr {
@@ -717,7 +902,7 @@ impl Parser {
         if self.eat(TokenKind::Arrow).is_none() {
             return left;
         }
-        let result = self.function_type();
+        let result = self.effect_type();
         let start = left.span().start;
         let params = match left {
             TypeExpr::Tuple { elems, .. } => elems,
@@ -728,6 +913,54 @@ impl Parser {
             params,
             result: Box::new(result),
             span,
+        }
+    }
+
+    fn effect_row(&mut self) -> EffectRow {
+        let start = self
+            .expect(TokenKind::LAngle, "expected `<` before effect row")
+            .start;
+        let mut effects = Vec::new();
+        let mut tail = None;
+        self.skip_delimited_ws();
+        while !self.at(TokenKind::RAngle) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Spread) {
+                if tail.is_some() {
+                    self.error_here("duplicate effect row spread");
+                    self.bump();
+                    self.expect_ident("expected effect row variable name after `...`");
+                } else {
+                    tail = Some(self.effect_row_tail());
+                }
+                self.eat(TokenKind::Comma);
+                self.skip_delimited_ws();
+                if !self.at(TokenKind::RAngle) && !self.at(TokenKind::Eof) {
+                    self.error_here("effect row spread must appear last");
+                }
+                continue;
+            }
+            effects.push(self.type_expr());
+            self.eat(TokenKind::Comma);
+            self.skip_delimited_ws();
+        }
+        let end = self
+            .expect(TokenKind::RAngle, "expected `>` after effect row")
+            .end;
+        EffectRow {
+            effects,
+            tail,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn effect_row_tail(&mut self) -> RowTail {
+        let start = self.expect(TokenKind::Spread, "expected `...`").start;
+        let name = self
+            .expect_ident("expected effect row variable name after `...`")
+            .unwrap_or_else(|| error_name(start));
+        RowTail {
+            span: Span::new(start, name.span.end),
+            name,
         }
     }
 
@@ -1105,10 +1338,7 @@ impl Parser {
     fn is_later_phase_keyword(&self) -> bool {
         matches!(
             self.peek().kind,
-            TokenKind::Keyword(Keyword::Effect)
-                | TokenKind::Keyword(Keyword::Handle)
-                | TokenKind::Keyword(Keyword::Given)
-                | TokenKind::Keyword(Keyword::Scope)
+            TokenKind::Keyword(Keyword::Given) | TokenKind::Keyword(Keyword::Scope)
         )
     }
 

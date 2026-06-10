@@ -609,6 +609,22 @@ mod tests {
     }
 
     #[test]
+    fn compile_rejects_phase_3_effect_runtime_before_emitting() {
+        let output = compile_output(&CompileCliOptions {
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/phase-3"),
+            target: CompileTarget::JavaScript,
+            out_dir: None,
+        })
+        .expect("compile output");
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains(
+            "unsupported-effect-runtime: effect handlers are not executable until Phase 3.1"
+        ));
+    }
+
+    #[test]
     fn compile_out_dir_outputs_executable_phase_2_5_modules() {
         let dir = temp_dir("fx-cli-compile-out");
         let out_dir = dir.join("out");

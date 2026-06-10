@@ -97,6 +97,7 @@ impl ModuleLowerer<'_, '_> {
             .filter_map(|item| match item {
                 Item::Import(_) => None,
                 Item::Type(decl) => self.lower_type_decl(decl).map(CoreDecl::Type),
+                Item::Effect(_) => None,
                 Item::Value(decl) => Some(CoreDecl::Value(self.lower_value_decl(decl))),
             })
             .collect();
@@ -339,6 +340,13 @@ impl ModuleLowerer<'_, '_> {
                     );
                 }
                 return current;
+            }
+            Expr::Handle { span, .. } => {
+                self.unsupported_effect_runtime(
+                    *span,
+                    "effect handlers are not executable until Phase 3.1",
+                );
+                CoreExprKind::Unit
             }
             Expr::Binary {
                 op, left, right, ..
@@ -586,6 +594,7 @@ impl ModuleLowerer<'_, '_> {
                     .collect(),
                 Box::new(self.lower_type_expr(result)),
             ),
+            TypeExpr::Effect { result, .. } => self.lower_type_expr(result),
             TypeExpr::Record { fields, .. } => Type::Row(RowType {
                 kind: RowKind::Record,
                 entries: fields
@@ -684,6 +693,14 @@ impl ModuleLowerer<'_, '_> {
             self.module,
             span,
             format!("Phase 2.5 compiler unsupported: {}", message.into()),
+        );
+    }
+
+    fn unsupported_effect_runtime(&mut self, span: Span, message: impl Into<String>) {
+        self.parent.diagnostic(
+            self.module,
+            span,
+            format!("unsupported-effect-runtime: {}", message.into()),
         );
     }
 }

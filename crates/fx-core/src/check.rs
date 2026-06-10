@@ -25,9 +25,16 @@ pub enum Type {
     Int,
     Text,
     List(Box<Type>),
-    Named { name: String, args: Vec<Type> },
+    Named {
+        name: String,
+        args: Vec<Type>,
+    },
     Var(TypeVar),
     Row(RowType),
+    Effectful {
+        result: Box<Type>,
+        effects: EffectRowType,
+    },
     Function(Vec<Type>, Box<Type>),
     Unknown,
 }
@@ -36,6 +43,12 @@ pub enum Type {
 pub struct RowType {
     pub kind: RowKind,
     pub entries: Vec<RowEntry>,
+    pub tail: Option<RowTailType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectRowType {
+    pub effects: Vec<Type>,
     pub tail: Option<RowTailType>,
 }
 
@@ -98,6 +111,7 @@ struct TypeDef {
 struct Substitution {
     types: BTreeMap<TypeVar, Type>,
     rows: BTreeMap<RowVar, RowType>,
+    effects: BTreeMap<RowVar, EffectRowType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +130,9 @@ enum CompatibilityError {
     },
     MissingCase {
         name: String,
+    },
+    UnhandledEffects {
+        effects: EffectRowType,
     },
 }
 
@@ -265,6 +282,19 @@ impl Type {
             Type::Row(row) if row.kind == RowKind::Variant => Some(row),
             _ => None,
         }
+    }
+}
+
+impl EffectRowType {
+    fn singleton(effect: Type) -> Self {
+        Self {
+            effects: vec![effect],
+            tail: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.effects.is_empty() && self.tail.is_none()
     }
 }
 
@@ -604,6 +634,39 @@ impl ModuleChecker<'_> {
                 body,
                 span,
             } => self.infer_with_expr(targets, body, *span, env),
+            Expr::Handle {
+                action,
+                clauses,
+                return_clause,
+                ..
+            } => {
+                self.infer_expr(action, env);
+                for clause in clauses {
+                    let mut clause_env = env.clone();
+                    for param in &clause.params {
+                        self.add_typed_span(
+                            param.span,
+                            TypedSpanKind::Parameter,
+                            &param.text,
+                            &Type::Unknown,
+                        );
+                        clause_env.insert(param.text.clone(), Type::Unknown);
+                    }
+                    self.check_block(&clause.body, &clause_env, &Type::Unknown);
+                }
+                if let Some(return_clause) = return_clause {
+                    let mut clause_env = env.clone();
+                    self.add_typed_span(
+                        return_clause.param.span,
+                        TypedSpanKind::Parameter,
+                        &return_clause.param.text,
+                        &Type::Unknown,
+                    );
+                    clause_env.insert(return_clause.param.text.clone(), Type::Unknown);
+                    self.check_block(&return_clause.body, &clause_env, &Type::Unknown);
+                }
+                Type::Unknown
+            }
             Expr::Binary {
                 op,
                 op_span,
@@ -1095,6 +1158,7 @@ impl ModuleChecker<'_> {
                     let subst = Substitution {
                         types,
                         rows: BTreeMap::new(),
+                        effects: BTreeMap::new(),
                     };
                     substitute(&def.body, &subst)
                 })
@@ -1124,6 +1188,9 @@ impl ModuleChecker<'_> {
             }
             Err(CompatibilityError::MissingCase { name }) => {
                 format!("variant row is missing case `{name}`")
+            }
+            Err(CompatibilityError::UnhandledEffects { effects }) => {
+                format!("unhandled effects {effects}")
             }
             Err(CompatibilityError::Mismatch) | Ok(()) => fallback,
         }
@@ -1184,6 +1251,7 @@ impl ModuleChecker<'_> {
         for item in &self.module.parsed.module.items {
             match item {
                 Item::Import(_) => {}
+                Item::Effect(_) => {}
                 Item::Type(decl) => {
                     let ty = Type::Named {
                         name: decl.name.text.clone(),
@@ -1375,6 +1443,55 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                         Type::Function(params, Box::new(result)),
                     );
                 }
+                Item::Effect(decl) => {
+                    types.insert(
+                        format!("{}.{}", module.name, decl.name.text),
+                        Type::Named {
+                            name: decl.name.text.clone(),
+                            args: decl
+                                .params
+                                .iter()
+                                .map(|param| {
+                                    Type::Var(TypeVar::scoped(
+                                        param.text.clone(),
+                                        format!("effect:{}:{}", module.name, decl.name.text),
+                                    ))
+                                })
+                                .collect(),
+                        },
+                    );
+                    let mut lowerer = TypeLowerer {
+                        diagnostics: Vec::new(),
+                        scope: Some(AnnotationScope::for_effect_decl(&module.name, decl)),
+                    };
+                    let effect_args = decl
+                        .params
+                        .iter()
+                        .map(|param| Type::Var(lowerer.type_var(param)))
+                        .collect::<Vec<_>>();
+                    let effect_ty = Type::Named {
+                        name: decl.name.text.clone(),
+                        args: effect_args,
+                    };
+                    for operation in &decl.operations {
+                        let params = operation
+                            .params
+                            .iter()
+                            .map(|param| lowerer.lower_type(&param.annotation))
+                            .collect();
+                        let result = lowerer.lower_type(&operation.result);
+                        types.insert(
+                            format!("{}.{}", module.name, operation.name.text),
+                            Type::Function(
+                                params,
+                                Box::new(Type::Effectful {
+                                    result: Box::new(result),
+                                    effects: EffectRowType::singleton(effect_ty.clone()),
+                                }),
+                            ),
+                        );
+                    }
+                }
                 Item::Import(_) => {}
             }
         }
@@ -1432,6 +1549,23 @@ impl AnnotationScope {
             .collect::<BTreeMap<_, _>>();
         let mut row_spans = BTreeMap::new();
         collect_annotation_vars(&decl.body, &mut type_spans, &mut row_spans);
+        Self::new(owner, type_spans, row_spans)
+    }
+
+    fn for_effect_decl(module: &str, decl: &EffectDecl) -> Self {
+        let owner = format!("effect:{module}:{}", decl.name.text);
+        let mut type_spans = decl
+            .params
+            .iter()
+            .map(|param| (param.text.clone(), param.span))
+            .collect::<BTreeMap<_, _>>();
+        let mut row_spans = BTreeMap::new();
+        for operation in &decl.operations {
+            for param in &operation.params {
+                collect_annotation_vars(&param.annotation, &mut type_spans, &mut row_spans);
+            }
+            collect_annotation_vars(&operation.result, &mut type_spans, &mut row_spans);
+        }
         Self::new(owner, type_spans, row_spans)
     }
 
@@ -1505,6 +1639,19 @@ fn collect_annotation_vars(
                 collect_annotation_vars(param, type_spans, row_spans);
             }
             collect_annotation_vars(result, type_spans, row_spans);
+        }
+        TypeExpr::Effect {
+            result, effects, ..
+        } => {
+            collect_annotation_vars(result, type_spans, row_spans);
+            for effect in &effects.effects {
+                collect_annotation_vars(effect, type_spans, row_spans);
+            }
+            if let Some(tail) = &effects.tail {
+                row_spans
+                    .entry(tail.name.text.clone())
+                    .or_insert(tail.name.span);
+            }
         }
         TypeExpr::Record { fields, tail, .. } => {
             for field in fields {
@@ -1606,10 +1753,33 @@ impl TypeLowerer {
                 params.iter().map(|param| self.lower_type(param)).collect(),
                 Box::new(self.lower_type(result)),
             ),
+            TypeExpr::Effect {
+                result, effects, ..
+            } => Type::Effectful {
+                result: Box::new(self.lower_type(result)),
+                effects: self.lower_effect_row(effects),
+            },
             TypeExpr::Record { fields, tail, .. } => self.lower_record_type(fields, tail),
             TypeExpr::Variant { cases, tail, .. } => self.lower_variant_type(cases, tail),
             TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => Type::Unknown,
         }
+    }
+
+    fn lower_effect_row(&mut self, row: &EffectRow) -> EffectRowType {
+        let effects = row
+            .effects
+            .iter()
+            .map(|effect| self.lower_type(effect))
+            .collect();
+        let tail = row.tail.as_ref().map(|tail| {
+            RowTailType::Var(
+                self.scope
+                    .as_ref()
+                    .map(|scope| scope.row_var(tail))
+                    .unwrap_or_else(|| RowVar::unscoped(tail.name.text.clone())),
+            )
+        });
+        EffectRowType { effects, tail }
     }
 
     fn lower_record_type(&mut self, fields: &[FieldType], tail: &Option<RowTail>) -> Type {
@@ -1733,6 +1903,30 @@ fn unify_compatible(
             Ok(())
         }
         (Type::Row(a), Type::Row(b)) => unify_rows(a, b, subst),
+        (
+            Type::Effectful {
+                result: found_result,
+                effects: found_effects,
+            },
+            Type::Effectful {
+                result: expected_result,
+                effects: expected_effects,
+            },
+        ) => {
+            unify_compatible(found_result, expected_result, subst)?;
+            unify_effect_rows(found_effects, expected_effects, subst)
+        }
+        (Type::Effectful { result, effects }, expected) => {
+            unify_compatible(result, expected, subst)?;
+            if effects.is_empty() {
+                Ok(())
+            } else {
+                Err(CompatibilityError::UnhandledEffects {
+                    effects: effects.clone(),
+                })
+            }
+        }
+        (found, Type::Effectful { result, effects: _ }) => unify_compatible(found, result, subst),
         (Type::Function(a_params, a_result), Type::Function(b_params, b_result))
             if a_params.len() == b_params.len() =>
         {
@@ -1742,6 +1936,47 @@ fn unify_compatible(
             unify_compatible(a_result, b_result, subst)
         }
         _ => Err(CompatibilityError::Mismatch),
+    }
+}
+
+fn unify_effect_rows(
+    found: &EffectRowType,
+    expected: &EffectRowType,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    let mut remaining = found.effects.clone();
+    for expected_effect in &expected.effects {
+        let Some(index) = remaining.iter().position(|found_effect| {
+            unify_compatible(found_effect, expected_effect, subst).is_ok()
+        }) else {
+            return Err(CompatibilityError::UnhandledEffects {
+                effects: EffectRowType {
+                    effects: vec![expected_effect.clone()],
+                    tail: None,
+                },
+            });
+        };
+        remaining.remove(index);
+    }
+
+    if let Some(RowTailType::Var(name)) = &expected.tail {
+        subst.effects.insert(
+            name.clone(),
+            EffectRowType {
+                effects: remaining,
+                tail: found.tail.clone(),
+            },
+        );
+        Ok(())
+    } else if remaining.is_empty() && found.tail.is_none() {
+        Ok(())
+    } else {
+        Err(CompatibilityError::UnhandledEffects {
+            effects: EffectRowType {
+                effects: remaining,
+                tail: found.tail.clone(),
+            },
+        })
     }
 }
 
@@ -1788,7 +2023,8 @@ fn unify_record_rows(
         unify_compatible(found_ty, ty, subst).map_err(|error| match error {
             CompatibilityError::RowKind { .. }
             | CompatibilityError::MissingField { .. }
-            | CompatibilityError::MissingCase { .. } => error,
+            | CompatibilityError::MissingCase { .. }
+            | CompatibilityError::UnhandledEffects { .. } => error,
             CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                 CompatibilityError::TypeMismatch {
                     expected: Box::new(ty.clone()),
@@ -1839,7 +2075,8 @@ fn unify_variant_rows(
             unify_compatible(found_ty, expected_ty, subst).map_err(|error| match error {
                 CompatibilityError::RowKind { .. }
                 | CompatibilityError::MissingField { .. }
-                | CompatibilityError::MissingCase { .. } => error,
+                | CompatibilityError::MissingCase { .. }
+                | CompatibilityError::UnhandledEffects { .. } => error,
                 CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                     CompatibilityError::TypeMismatch {
                         expected: Box::new(expected_ty.clone()),
@@ -1926,6 +2163,18 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut Substitution) {
                 let _ = unify_rows(found_row, row, subst);
             }
         }
+        Type::Effectful { result, effects } => {
+            if let Type::Effectful {
+                result: found_result,
+                effects: found_effects,
+            } = found
+            {
+                unify_vars(result, found_result, subst);
+                let _ = unify_effect_rows(found_effects, effects, subst);
+            } else {
+                unify_vars(result, found, subst);
+            }
+        }
         Type::Function(params, result) => {
             if let Type::Function(found_params, found_result) = found {
                 for (param, found_param) in params.iter().zip(found_params) {
@@ -1947,6 +2196,10 @@ fn substitute(ty: &Type, subst: &Substitution) -> Type {
             args: args.iter().map(|arg| substitute(arg, subst)).collect(),
         },
         Type::Row(row) => Type::Row(substitute_row(row, subst)),
+        Type::Effectful { result, effects } => Type::Effectful {
+            result: Box::new(substitute(result, subst)),
+            effects: substitute_effect_row(effects, subst),
+        },
         Type::Function(params, result) => Type::Function(
             params
                 .iter()
@@ -1956,6 +2209,29 @@ fn substitute(ty: &Type, subst: &Substitution) -> Type {
         ),
         Type::Unit | Type::Bool | Type::Int | Type::Text | Type::Unknown => ty.clone(),
     }
+}
+
+fn substitute_effect_row(row: &EffectRowType, subst: &Substitution) -> EffectRowType {
+    let mut effects = row
+        .effects
+        .iter()
+        .map(|effect| substitute(effect, subst))
+        .collect::<Vec<_>>();
+
+    let tail = match &row.tail {
+        Some(RowTailType::Var(name)) => {
+            if let Some(bound) = subst.effects.get(name) {
+                let bound = substitute_effect_row(bound, subst);
+                effects.extend(bound.effects);
+                bound.tail
+            } else {
+                row.tail.clone()
+            }
+        }
+        None => None,
+    };
+
+    EffectRowType { effects, tail }
 }
 
 fn substitute_row(row: &RowType, subst: &Substitution) -> RowType {
@@ -2015,6 +2291,7 @@ impl std::fmt::Display for Type {
             }
             Type::Var(name) => write!(f, "{name}"),
             Type::Row(row) => write!(f, "{row}"),
+            Type::Effectful { result, effects } => write!(f, "{result} with {effects}"),
             Type::Function(params, result) => {
                 write!(f, "(")?;
                 for (i, param) in params.iter().enumerate() {
@@ -2027,6 +2304,27 @@ impl std::fmt::Display for Type {
             }
             Type::Unknown => write!(f, "<unknown>"),
         }
+    }
+}
+
+impl std::fmt::Display for EffectRowType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "< ")?;
+        let mut first = true;
+        for effect in &self.effects {
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "{effect}")?;
+        }
+        if let Some(RowTailType::Var(name)) = &self.tail {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "...{name}")?;
+        }
+        write!(f, " >")
     }
 }
 
