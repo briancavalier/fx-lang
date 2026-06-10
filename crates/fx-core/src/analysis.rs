@@ -1,4 +1,4 @@
-use crate::check::{CheckResult, TypedSpan};
+use crate::check::{CheckResult, TypedSpan, TypedSpanKind};
 use crate::module::{ModuleGraph, SourceFile};
 use crate::{check_workspace, index_workspace, resolve_workspace};
 use fx_syntax::ast::*;
@@ -396,7 +396,10 @@ fn bind_pattern_definitions(
 }
 
 fn hover_contents(typed: &TypedSpan) -> String {
-    format!("{} : {}", typed.label, typed.display_type)
+    match typed.kind {
+        TypedSpanKind::Effect => typed.display_type.clone(),
+        _ => format!("{} : {}", typed.label, typed.display_type),
+    }
 }
 
 fn contains_offset(span: Span, offset: usize) -> bool {

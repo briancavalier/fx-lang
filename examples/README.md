@@ -126,14 +126,13 @@ node -e "import('/tmp/fxl-phase-2.6/main.mjs').then((m) => console.log(m.__fx_us
 
 ## Phase 3
 
-Phase 3 examples are goal targets for ordinary algebraic effects. They are not
-expected to parse or check successfully until Phase 3 support lands:
+Phase 3 examples are check fixtures for ordinary algebraic effects:
 
 - `phase-3/effects.fx`
 - `phase-3/imported.fx`
 - `phase-3/resume.fx`
 
-Once Phase 3 support lands, check all Phase 3 examples:
+Check all Phase 3 examples:
 
 ```sh
 cargo run -q -p fx-cli -- check examples/phase-3

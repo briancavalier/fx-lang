@@ -136,6 +136,215 @@ bad() : Int
 }
 
 #[test]
+fn tracks_effects_through_blocks_branches_matches_and_operators() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+type Decision = < Use(), Skip() >
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+
+through-let() : Int with <Raise>
+  value = safe-divide(10, 0)
+  value + 1
+
+through-if(flag: Bool) : Int with <Raise>
+  if flag then safe-divide(10, 0) + 1 else 0
+
+through-match(decision: Decision) : Int with <Raise>
+  match decision
+    Use() -> safe-divide(10, 0)
+    Skip() -> 0
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_effects_from_local_bindings_in_pure_annotations() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+
+bad() : Int
+  value = safe-divide(10, 0)
+  value + 1
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("unhandled effects < Raise >") })
+    );
+}
+
+#[test]
+fn checks_basic_handlers_remove_handled_effects_and_type_resume() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+export effect Choose
+  choose(left: a, right: a) : a
+
+catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
+  handle action()
+    raise(_message, _resume) ->
+      default
+
+    return(value) ->
+      value
+
+choose-first(action: () -> a with <Choose, ...e>) : a with <...e>
+  handle action()
+    choose(left, _right, resume) ->
+      resume(left)
+
+    return(value) ->
+      value
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert_eq!(result.diagnostics, []);
+    let spans = result.typed_spans.get("effects").expect("typed spans");
+    assert!(
+        spans
+            .iter()
+            .any(|span| { span.label == "resume" && span.display_type == "(a) -> a" })
+    );
+}
+
+#[test]
+fn reports_unhandled_effects_when_handler_leaves_action_effects() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+bad(action: () -> Int with <Raise>) : Int
+  handle action()
+    return(value) ->
+      value
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("missing handler clause for effect `Raise`")
+    }));
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("unhandled effects < Raise >") })
+    );
+}
+
+#[test]
+fn reports_duplicate_and_unknown_handler_clauses() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+bad(action: () -> Int with <Raise>) : Int
+  handle action()
+    raise(_message, _resume) ->
+      0
+
+    raise(_message, _resume) ->
+      1
+
+    missing(_resume) ->
+      2
+
+    return(value) ->
+      value
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate handler clause `raise`")
+    }));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("unknown handler operation `missing`")
+    }));
+}
+
+#[test]
+fn reports_handler_clauses_for_effects_not_performed_by_action() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-3"),
+        vec![SourceFile {
+            path: PathBuf::from("examples/phase-3/effects.fx"),
+            source: r#"export effect Raise
+  raise(message: Text) : a
+
+pure() : Int
+  1
+
+bad() : Int
+  handle pure()
+    raise(_message, _resume) ->
+      0
+
+    return(value) ->
+      value
+"#
+            .to_string(),
+        }],
+    );
+    let result = check_workspace(&graph);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("handler clause `raise` does not handle an effect performed by the action")
+    }));
+}
+
+#[test]
 fn checker_runs_on_phase_1_todo_fixture() {
     let graph = todo_graph();
     let result = check_workspace(&graph);
@@ -259,6 +468,30 @@ fn resolves_imported_unqualified_symbols() {
     let main = resolved.modules.get("main").expect("main module");
     assert!(main.references.iter().any(|reference| {
         reference.name == "value" && reference.target.qualified_name == "lib.value"
+    }));
+}
+
+#[test]
+fn resolves_sibling_imports_when_indexing_parent_directory() {
+    let graph = index_workspace(
+        &PathBuf::from("examples"),
+        vec![
+            source("examples/nested/lib.fx", "export value() : Int\n  1\n"),
+            source(
+                "examples/nested/main.fx",
+                "import lib\n\nmain() : Int\n  value()\n\nqualified() : Int\n  lib.value()\n",
+            ),
+        ],
+    );
+    let resolved = resolve_workspace(&graph);
+
+    assert_eq!(resolved.diagnostics, []);
+    let main = resolved.modules.get("nested.main").expect("main module");
+    assert!(main.references.iter().any(|reference| {
+        reference.name == "value" && reference.target.qualified_name == "nested.lib.value"
+    }));
+    assert!(main.references.iter().any(|reference| {
+        reference.name == "lib.value" && reference.target.qualified_name == "nested.lib.value"
     }));
 }
 
@@ -1748,6 +1981,38 @@ fn hovers_top_level_function_type() {
         .expect("hover");
 
     assert_eq!(hover.contents, "answer : () -> Int");
+}
+
+#[test]
+fn hovers_effect_declarations_and_operations() {
+    let source_text = r#"export effect Raise
+  raise(message: Text) : a
+
+safe() : Int with <Raise>
+  raise("nope")
+"#;
+    let analysis = analyze_single("effects.fx", source_text);
+
+    let effect_hover = analysis
+        .hover_at("effects", offset_of(source_text, "Raise"))
+        .expect("effect hover");
+    assert_eq!(effect_hover.contents, "effect Raise");
+
+    let operation_hover = analysis
+        .hover_at("effects", offset_of(source_text, "raise(message"))
+        .expect("operation declaration hover");
+    assert_eq!(
+        operation_hover.contents,
+        "raise : (Text) -> a with < Raise >"
+    );
+
+    let operation_call_hover = analysis
+        .hover_at("effects", offset_of(source_text, "raise(\"nope\")"))
+        .expect("operation call hover");
+    assert_eq!(
+        operation_call_hover.contents,
+        "raise : (Text) -> a with < Raise >"
+    );
 }
 
 #[test]

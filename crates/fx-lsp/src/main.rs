@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic as LspDiagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
@@ -56,6 +57,11 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(tower_lsp::lsp_types::HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..CompletionOptions::default()
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -151,6 +157,16 @@ impl LanguageServer for Backend {
             uri: target_uri,
             range: target_line_index.span_to_range(definition.span),
         })))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
+            return Ok(None);
+        };
+        Ok(Some(CompletionResponse::Array(completions_for_analysis(
+            &snapshot.analysis,
+        ))))
     }
 
     async fn document_symbol(
@@ -334,6 +350,37 @@ fn workspace_symbols_for_analysis(analysis: &Analysis, query: &str) -> Vec<Symbo
     symbols
 }
 
+fn completions_for_analysis(analysis: &Analysis) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    for module in analysis.graph.modules.values() {
+        for symbol in &module.symbols {
+            let mut item =
+                CompletionItem::new_simple(symbol.name.clone(), symbol.qualified_name.clone());
+            item.kind = Some(completion_item_kind(symbol.kind));
+            if let Some(ty) = analysis
+                .check
+                .module_types
+                .get(&symbol.module)
+                .and_then(|types| types.get(&symbol.name))
+            {
+                item.detail = Some(format!("{} : {ty}", symbol.name));
+            }
+            items.push(item);
+        }
+    }
+    items
+}
+
+fn completion_item_kind(kind: FxSymbolKind) -> CompletionItemKind {
+    match kind {
+        FxSymbolKind::Value => CompletionItemKind::FUNCTION,
+        FxSymbolKind::Type => CompletionItemKind::STRUCT,
+        FxSymbolKind::Constructor => CompletionItemKind::CONSTRUCTOR,
+        FxSymbolKind::Effect => CompletionItemKind::INTERFACE,
+        FxSymbolKind::Operation => CompletionItemKind::FUNCTION,
+    }
+}
+
 fn workspace_symbol_matches(symbol: &Symbol, query: &str) -> bool {
     symbol.name.to_lowercase().contains(query)
         || symbol.qualified_name.to_lowercase().contains(query)
@@ -513,12 +560,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Document, LineIndex, document_symbols_for_document, lsp_diagnostics_for_document,
-        workspace_symbols_for_analysis,
+        Document, LineIndex, completions_for_analysis, document_symbols_for_document,
+        lsp_diagnostics_for_document, workspace_symbols_for_analysis,
     };
     use fx_core::{AnalysisDiagnostic, SourceFile, analyze_workspace};
     use fx_syntax::span::Span;
     use std::path::PathBuf;
+    use tower_lsp::lsp_types::CompletionItemKind;
     use tower_lsp::lsp_types::Url;
     use tower_lsp::lsp_types::{Position, SymbolKind};
 
@@ -656,6 +704,46 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.name == "message")
         );
+    }
+
+    #[test]
+    fn phase_3_effects_have_symbols_and_operation_completions() {
+        let source = include_str!("../../../examples/phase-3/effects.fx");
+        let path = "/private/tmp/effects.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let diagnostics = analysis
+            .diagnostics_by_path()
+            .get(&PathBuf::from(path))
+            .map(|diagnostics| lsp_diagnostics_for_document(&document, diagnostics))
+            .unwrap_or_default();
+
+        assert_eq!(diagnostics, []);
+
+        let symbols = document_symbols_for_document(&analysis, &document);
+        let children = symbols[0].children.as_ref().expect("children");
+        assert!(
+            children
+                .iter()
+                .any(|symbol| { symbol.name == "Raise" && symbol.kind == SymbolKind::INTERFACE })
+        );
+        assert!(
+            children
+                .iter()
+                .any(|symbol| { symbol.name == "raise" && symbol.kind == SymbolKind::FUNCTION })
+        );
+
+        let workspace_symbols = workspace_symbols_for_analysis(&analysis, "raise");
+        assert!(
+            workspace_symbols
+                .iter()
+                .any(|symbol| symbol.name == "raise")
+        );
+
+        let completions = completions_for_analysis(&analysis);
+        assert!(completions.iter().any(|item| {
+            item.label == "raise" && item.kind == Some(CompletionItemKind::FUNCTION)
+        }));
     }
 
     fn document(path: &str, text: &str) -> Document {

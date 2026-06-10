@@ -107,6 +107,20 @@ pub(crate) fn resolve_visible_symbol(
     kind: Option<SymbolKind>,
 ) -> Result<Option<Symbol>, Vec<Symbol>> {
     if name.contains('.') {
+        if let Some((root, member)) = name.split_once('.') {
+            if let Some(import) = module
+                .imports
+                .iter()
+                .find(|import| import.rsplit('.').next() == Some(root))
+            {
+                let qualified = format!("{import}.{member}");
+                return Ok(symbols
+                    .qualified(&qualified)
+                    .filter(|symbol| symbol.exported)
+                    .filter(|symbol| kind.is_none_or(|kind| symbol.kind == kind))
+                    .cloned());
+            }
+        }
         return Ok(symbols
             .qualified(name)
             .filter(|symbol| symbol.module == module.name || symbol.exported)

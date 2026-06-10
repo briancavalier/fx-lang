@@ -77,14 +77,18 @@ pub fn index_workspace(root: &Path, files: Vec<SourceFile>) -> ModuleGraph {
 
     let module_names = modules.keys().cloned().collect::<BTreeSet<_>>();
     for module in modules.values_mut() {
-        for import in module.imports.clone() {
-            if !module_names.contains(&import) {
+        let mut resolved_imports = Vec::new();
+        for import in &module.imports {
+            if let Some(resolved) = resolve_import_name(&module.name, import, &module_names) {
+                resolved_imports.push(resolved);
+            } else {
                 module.diagnostics.push(Diagnostic::new(
                     Span::point(0),
                     format!("unresolved import `{import}` in module `{}`", module.name),
                 ));
             }
         }
+        module.imports = resolved_imports;
     }
 
     let diagnostics = modules
@@ -217,4 +221,17 @@ fn module_name(root: &Path, path: &Path) -> String {
         .map(|part| part.replace('/', "."))
         .collect::<Vec<_>>()
         .join(".")
+}
+
+fn resolve_import_name(
+    module_name: &str,
+    import: &str,
+    module_names: &BTreeSet<String>,
+) -> Option<String> {
+    if module_names.contains(import) {
+        return Some(import.to_string());
+    }
+    let (parent, _) = module_name.rsplit_once('.')?;
+    let sibling = format!("{parent}.{import}");
+    module_names.contains(&sibling).then_some(sibling)
 }

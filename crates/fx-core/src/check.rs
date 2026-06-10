@@ -94,6 +94,8 @@ pub struct TypedSpan {
 pub enum TypedSpanKind {
     Value,
     Type,
+    Effect,
+    Operation,
     Constructor,
     Parameter,
     Local,
@@ -286,6 +288,13 @@ impl Type {
 }
 
 impl EffectRowType {
+    fn empty() -> Self {
+        Self {
+            effects: Vec::new(),
+            tail: None,
+        }
+    }
+
     fn singleton(effect: Type) -> Self {
         Self {
             effects: vec![effect],
@@ -295,6 +304,60 @@ impl EffectRowType {
 
     fn is_empty(&self) -> bool {
         self.effects.is_empty() && self.tail.is_none()
+    }
+
+    fn extend(&mut self, other: EffectRowType) {
+        for effect in other.effects {
+            if !self.effects.contains(&effect) {
+                self.effects.push(effect);
+            }
+        }
+        if self.tail.is_none() {
+            self.tail = other.tail;
+        } else if self.tail == other.tail {
+            // Keep the existing equivalent tail.
+        }
+    }
+}
+
+fn split_effectful(ty: Type) -> (Type, EffectRowType) {
+    match ty {
+        Type::Effectful { result, effects } => (*result, effects),
+        other => (other, EffectRowType::empty()),
+    }
+}
+
+fn attach_effects(result: Type, effects: EffectRowType) -> Type {
+    if effects.is_empty() {
+        result
+    } else {
+        let (result, existing) = split_effectful(result);
+        let mut effects = effects;
+        effects.extend(existing);
+        Type::Effectful {
+            result: Box::new(result),
+            effects,
+        }
+    }
+}
+
+fn remove_effects(row: &mut EffectRowType, handled: &EffectRowType) -> bool {
+    let mut removed = false;
+    for handled_effect in &handled.effects {
+        if let Some(index) = row.effects.iter().position(|effect| {
+            unify_compatible(effect, handled_effect, &mut Substitution::default()).is_ok()
+        }) {
+            row.effects.remove(index);
+            removed = true;
+        }
+    }
+    removed
+}
+
+fn expected_result_type(expected: &Type) -> Type {
+    match expected {
+        Type::Effectful { result, .. } => result.as_ref().clone(),
+        other => other.clone(),
     }
 }
 
@@ -374,10 +437,13 @@ impl ModuleChecker<'_> {
         expected: &Type,
     ) -> Type {
         let mut env = env.clone();
+        let mut effects = EffectRowType::empty();
         for statement in &block.statements {
             match statement {
                 Stmt::Let(binding) => {
                     let ty = self.infer_expr(&binding.value, &env);
+                    let (ty, binding_effects) = split_effectful(ty);
+                    effects.extend(binding_effects);
                     self.add_typed_span(
                         binding.name.span,
                         TypedSpanKind::Local,
@@ -388,7 +454,21 @@ impl ModuleChecker<'_> {
                 }
             }
         }
-        self.check_expr(&block.result, &env, expected)
+        let result = self.check_expr(&block.result, &env, expected);
+        let (result, result_effects) = split_effectful(result);
+        let has_statement_effects = !effects.is_empty();
+        effects.extend(result_effects);
+        let found = attach_effects(result, effects);
+        if has_statement_effects && !self.compatible(&found, expected) {
+            let message = self.compatibility_message(
+                &found,
+                expected,
+                format!("expected `{expected}`, found `{found}`"),
+            );
+            self.diagnostics
+                .push(Diagnostic::new(block.result.span(), message));
+        }
+        found
     }
 
     fn check_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>, expected: &Type) -> Type {
@@ -396,10 +476,13 @@ impl ModuleChecker<'_> {
             Expr::Lambda { .. } => self.check_lambda(expr, env, expected),
             Expr::List { items, .. } => {
                 if let Type::List(item_expected) = self.expand_alias(expected) {
+                    let mut effects = EffectRowType::empty();
                     for item in items {
-                        self.check_expr(item, env, &item_expected);
+                        let item_ty = self.check_expr(item, env, &item_expected);
+                        let (_, item_effects) = split_effectful(item_ty);
+                        effects.extend(item_effects);
                     }
-                    expected.clone()
+                    attach_effects(expected.clone(), effects)
                 } else {
                     self.check_inferred_expr(expr, env, expected)
                 }
@@ -410,24 +493,35 @@ impl ModuleChecker<'_> {
                 else_branch,
                 ..
             } => {
-                self.check_expr(condition, env, &Type::Bool);
-                self.check_expr(then_branch, env, expected);
-                self.check_expr(else_branch, env, expected);
-                expected.clone()
+                let condition_ty = self.check_expr(condition, env, &Type::Bool);
+                let (_, condition_effects) = split_effectful(condition_ty);
+                let then_ty = self.check_expr(then_branch, env, expected);
+                let (_, then_effects) = split_effectful(then_ty);
+                let else_ty = self.check_expr(else_branch, env, expected);
+                let (_, else_effects) = split_effectful(else_ty);
+                let mut effects = condition_effects;
+                effects.extend(then_effects);
+                effects.extend(else_effects);
+                attach_effects(expected_result_type(expected), effects)
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
                 let scrutinee_ty = self.infer_expr(scrutinee, env);
+                let (scrutinee_ty, scrutinee_effects) = split_effectful(scrutinee_ty);
+                let mut effects = scrutinee_effects;
                 for arm in arms {
                     let mut arm_env = env.clone();
                     let mut bound_names = BTreeSet::new();
                     self.check_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env, &mut bound_names);
-                    self.check_expr(&arm.value, &arm_env, expected);
+                    let arm_ty = self.check_expr(&arm.value, &arm_env, expected);
+                    let (_, arm_effects) = split_effectful(arm_ty);
+                    effects.extend(arm_effects);
                 }
-                expected.clone()
+                attach_effects(expected_result_type(expected), effects)
             }
             Expr::With { .. } => self.check_inferred_expr(expr, env, expected),
+            Expr::Handle { .. } => self.check_handle_expr(expr, env, expected),
             _ => self.check_inferred_expr(expr, env, expected),
         }
     }
@@ -508,12 +602,20 @@ impl ModuleChecker<'_> {
             Expr::Bool { .. } => Type::Bool,
             Expr::Unit { .. } => Type::Unit,
             Expr::List { items, .. } => {
+                let mut effects = EffectRowType::empty();
                 let elem = items
                     .first()
-                    .map(|item| self.infer_expr(item, env))
+                    .map(|item| {
+                        let item_ty = self.infer_expr(item, env);
+                        let (item_ty, item_effects) = split_effectful(item_ty);
+                        effects.extend(item_effects);
+                        item_ty
+                    })
                     .unwrap_or(Type::Unknown);
                 for item in items.iter().skip(1) {
                     let found = self.infer_expr(item, env);
+                    let (found, item_effects) = split_effectful(found);
+                    effects.extend(item_effects);
                     if !self.compatible(&found, &elem) {
                         let message = self.compatibility_message(
                             &found,
@@ -523,14 +625,21 @@ impl ModuleChecker<'_> {
                         self.diagnostics.push(Diagnostic::new(item.span(), message));
                     }
                 }
-                Type::List(Box::new(elem))
+                attach_effects(Type::List(Box::new(elem)), effects)
             }
-            Expr::Record { fields, .. } => Type::closed_record(
-                fields
+            Expr::Record { fields, .. } => {
+                let mut effects = EffectRowType::empty();
+                let fields = fields
                     .iter()
-                    .map(|field| (field.name.text.clone(), self.infer_expr(&field.value, env)))
-                    .collect(),
-            ),
+                    .map(|field| {
+                        let ty = self.infer_expr(&field.value, env);
+                        let (ty, field_effects) = split_effectful(ty);
+                        effects.extend(field_effects);
+                        (field.name.text.clone(), ty)
+                    })
+                    .collect();
+                attach_effects(Type::closed_record(fields), effects)
+            }
             Expr::RecordUpdate { base, fields, .. } => self.infer_record_update(base, fields, env),
             Expr::Lambda { .. } => {
                 self.diagnostics.push(Diagnostic::new(
@@ -541,6 +650,7 @@ impl ModuleChecker<'_> {
             }
             Expr::Field { target, field, .. } => {
                 let target_ty = self.infer_expr(target, env);
+                let (target_ty, target_effects) = split_effectful(target_ty);
                 match self.expand_alias(&target_ty) {
                     Type::Row(row) if row.kind == RowKind::Record => row
                         .field(&field.text)
@@ -548,6 +658,7 @@ impl ModuleChecker<'_> {
                         .inspect(|ty| {
                             self.add_typed_span(field.span, TypedSpanKind::Field, &field.text, ty);
                         })
+                        .map(|ty| attach_effects(ty, target_effects.clone()))
                         .unwrap_or_else(|| {
                             self.diagnostics.push(Diagnostic::new(
                                 field.span,
@@ -575,6 +686,7 @@ impl ModuleChecker<'_> {
                 ..
             } => {
                 let condition_ty = self.infer_expr(condition, env);
+                let (condition_ty, condition_effects) = split_effectful(condition_ty);
                 if !self.compatible(&condition_ty, &Type::Bool) {
                     self.diagnostics.push(Diagnostic::new(
                         condition.span(),
@@ -582,9 +694,14 @@ impl ModuleChecker<'_> {
                     ));
                 }
                 let then_ty = self.infer_expr(then_branch, env);
+                let (then_ty, then_effects) = split_effectful(then_ty);
                 let else_ty = self.infer_expr(else_branch, env);
+                let (else_ty, else_effects) = split_effectful(else_ty);
                 if self.compatible(&then_ty, &else_ty) {
-                    then_ty
+                    let mut effects = condition_effects;
+                    effects.extend(then_effects);
+                    effects.extend(else_effects);
+                    attach_effects(then_ty, effects)
                 } else {
                     let message = self.compatibility_message(
                         &then_ty,
@@ -601,12 +718,16 @@ impl ModuleChecker<'_> {
                     Expr::Match { scrutinee, .. } => self.infer_expr(scrutinee, env),
                     _ => Type::Unknown,
                 };
+                let (scrutinee_ty, scrutinee_effects) = split_effectful(scrutinee_ty);
+                let mut effects = scrutinee_effects;
                 let mut found = Type::Unknown;
                 for arm in arms {
                     let mut arm_env = env.clone();
                     let mut bound_names = BTreeSet::new();
                     self.check_pattern(&arm.pattern, &scrutinee_ty, &mut arm_env, &mut bound_names);
                     let arm_ty = self.infer_expr(&arm.value, &arm_env);
+                    let (arm_ty, arm_effects) = split_effectful(arm_ty);
+                    effects.extend(arm_effects);
                     if matches!(found, Type::Unknown) {
                         found = arm_ty;
                     } else if !self.compatible(&found, &arm_ty) {
@@ -621,7 +742,7 @@ impl ModuleChecker<'_> {
                             .push(Diagnostic::new(arm.value.span(), message));
                     }
                 }
-                found
+                attach_effects(found, effects)
             }
             Expr::Pipeline {
                 value,
@@ -634,39 +755,7 @@ impl ModuleChecker<'_> {
                 body,
                 span,
             } => self.infer_with_expr(targets, body, *span, env),
-            Expr::Handle {
-                action,
-                clauses,
-                return_clause,
-                ..
-            } => {
-                self.infer_expr(action, env);
-                for clause in clauses {
-                    let mut clause_env = env.clone();
-                    for param in &clause.params {
-                        self.add_typed_span(
-                            param.span,
-                            TypedSpanKind::Parameter,
-                            &param.text,
-                            &Type::Unknown,
-                        );
-                        clause_env.insert(param.text.clone(), Type::Unknown);
-                    }
-                    self.check_block(&clause.body, &clause_env, &Type::Unknown);
-                }
-                if let Some(return_clause) = return_clause {
-                    let mut clause_env = env.clone();
-                    self.add_typed_span(
-                        return_clause.param.span,
-                        TypedSpanKind::Parameter,
-                        &return_clause.param.text,
-                        &Type::Unknown,
-                    );
-                    clause_env.insert(return_clause.param.text.clone(), Type::Unknown);
-                    self.check_block(&return_clause.body, &clause_env, &Type::Unknown);
-                }
-                Type::Unknown
-            }
+            Expr::Handle { .. } => self.check_handle_expr(expr, env, &Type::Unknown),
             Expr::Binary {
                 op,
                 op_span,
@@ -675,6 +764,177 @@ impl ModuleChecker<'_> {
                 ..
             } => self.infer_binary_expr(*op, *op_span, left, right, env),
             Expr::Error { .. } => Type::Unknown,
+        }
+    }
+
+    fn check_handle_expr(
+        &mut self,
+        expr: &Expr,
+        env: &BTreeMap<String, Type>,
+        expected: &Type,
+    ) -> Type {
+        let Expr::Handle {
+            action,
+            clauses,
+            return_clause,
+            ..
+        } = expr
+        else {
+            return Type::Unknown;
+        };
+
+        let action_ty = self.infer_expr(action, env);
+        let (action_result, mut remaining_effects) = split_effectful(action_ty);
+        let handler_result = match expected {
+            Type::Unknown => action_result.clone(),
+            _ => expected_result_type(expected),
+        };
+        let mut handler_effects = EffectRowType::empty();
+        let mut seen_clauses = BTreeSet::new();
+
+        for clause in clauses {
+            if !seen_clauses.insert(clause.operation.text.clone()) {
+                self.diagnostics.push(Diagnostic::new(
+                    clause.operation.span,
+                    format!("duplicate handler clause `{}`", clause.operation.text),
+                ));
+            }
+            let operation_ty =
+                self.resolve_handler_operation(&clause.operation.text, clause.operation.span);
+            self.add_typed_span(
+                clause.operation.span,
+                TypedSpanKind::Value,
+                &clause.operation.text,
+                &operation_ty,
+            );
+            let (payload_types, operation_result, operation_effects) =
+                self.handler_operation_signature(&operation_ty, &action_result);
+            let mut expected_params = payload_types;
+            expected_params.push(Type::Function(
+                vec![operation_result.clone()],
+                Box::new(handler_result.clone()),
+            ));
+
+            if clause.params.len() != expected_params.len() {
+                self.diagnostics.push(Diagnostic::new(
+                    clause.operation.span,
+                    format!(
+                        "handler clause `{}` expects {} parameters, found {}",
+                        clause.operation.text,
+                        expected_params.len(),
+                        clause.params.len()
+                    ),
+                ));
+            }
+
+            let mut clause_env = env.clone();
+            for (index, param) in clause.params.iter().enumerate() {
+                let param_ty = expected_params.get(index).cloned().unwrap_or(Type::Unknown);
+                self.add_typed_span(param.span, TypedSpanKind::Parameter, &param.text, &param_ty);
+                clause_env.insert(param.text.clone(), param_ty);
+            }
+            let clause_ty = self.check_block(&clause.body, &clause_env, &handler_result);
+            let (_, clause_effects) = split_effectful(clause_ty);
+            handler_effects.extend(clause_effects);
+            if !remove_effects(&mut remaining_effects, &operation_effects)
+                && !operation_effects.effects.is_empty()
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    clause.operation.span,
+                    format!(
+                        "handler clause `{}` does not handle an effect performed by the action",
+                        clause.operation.text
+                    ),
+                ));
+            }
+        }
+
+        if let Some(return_clause) = return_clause {
+            let mut clause_env = env.clone();
+            self.add_typed_span(
+                return_clause.param.span,
+                TypedSpanKind::Parameter,
+                &return_clause.param.text,
+                &action_result,
+            );
+            clause_env.insert(return_clause.param.text.clone(), action_result.clone());
+            let return_ty = self.check_block(&return_clause.body, &clause_env, &handler_result);
+            let (_, return_effects) = split_effectful(return_ty);
+            handler_effects.extend(return_effects);
+        }
+
+        for effect in &remaining_effects.effects {
+            self.diagnostics.push(Diagnostic::new(
+                expr.span(),
+                format!(
+                    "missing handler clause for effect `{}`",
+                    effect_label(effect)
+                ),
+            ));
+        }
+
+        remaining_effects.extend(handler_effects);
+        let found = attach_effects(handler_result, remaining_effects);
+        if !matches!(expected, Type::Unknown) && !self.compatible(&found, expected) {
+            let message = self.compatibility_message(
+                &found,
+                expected,
+                format!("expected `{expected}`, found `{found}`"),
+            );
+            self.diagnostics.push(Diagnostic::new(expr.span(), message));
+        }
+        found
+    }
+
+    fn handler_operation_signature(
+        &mut self,
+        operation_ty: &Type,
+        action_result: &Type,
+    ) -> (Vec<Type>, Type, EffectRowType) {
+        let Type::Function(params, result) = operation_ty else {
+            return (Vec::new(), Type::Unknown, EffectRowType::empty());
+        };
+        let (operation_result, operation_effects) = split_effectful(result.as_ref().clone());
+        let mut subst = Substitution::default();
+        let _ = unify_compatible(&operation_result, action_result, &mut subst);
+        let params = params
+            .iter()
+            .map(|param| substitute(param, &subst))
+            .collect::<Vec<_>>();
+        (
+            params,
+            substitute(&operation_result, &subst),
+            substitute_effect_row(&operation_effects, &subst),
+        )
+    }
+
+    fn resolve_handler_operation(&mut self, name: &str, span: Span) -> Type {
+        match resolve_visible_symbol(
+            self.module,
+            self.symbol_tables,
+            name,
+            Some(SymbolKind::Operation),
+        ) {
+            Ok(Some(symbol)) => self.type_for_symbol(&symbol),
+            Ok(None) => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("unknown handler operation `{name}`"),
+                ));
+                Type::Unknown
+            }
+            Err(symbols) => {
+                let candidates = symbols
+                    .iter()
+                    .map(|symbol| symbol.qualified_name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("ambiguous handler operation `{name}`; candidates: {candidates}"),
+                ));
+                Type::Unknown
+            }
         }
     }
 
@@ -729,10 +989,13 @@ impl ModuleChecker<'_> {
 
     fn infer_block(&mut self, block: &Block, env: &BTreeMap<String, Type>) -> Type {
         let mut env = env.clone();
+        let mut effects = EffectRowType::empty();
         for statement in &block.statements {
             match statement {
                 Stmt::Let(binding) => {
                     let ty = self.infer_expr(&binding.value, &env);
+                    let (ty, binding_effects) = split_effectful(ty);
+                    effects.extend(binding_effects);
                     self.add_typed_span(
                         binding.name.span,
                         TypedSpanKind::Local,
@@ -743,7 +1006,10 @@ impl ModuleChecker<'_> {
                 }
             }
         }
-        self.infer_expr(&block.result, &env)
+        let result = self.infer_expr(&block.result, &env);
+        let (result, result_effects) = split_effectful(result);
+        effects.extend(result_effects);
+        attach_effects(result, effects)
     }
 
     fn infer_sugared_call(
@@ -813,6 +1079,7 @@ impl ModuleChecker<'_> {
                     ));
                 }
                 let mut subst = Substitution::default();
+                let mut effects = EffectRowType::empty();
                 for (arg, expected) in args.iter().zip(params.iter()) {
                     let found = match arg {
                         CallArg::Expr(expr) => self.check_expr(expr, env, expected),
@@ -828,9 +1095,11 @@ impl ModuleChecker<'_> {
                             ty.clone()
                         }
                     };
+                    let (found, arg_effects) = split_effectful(found);
+                    effects.extend(arg_effects);
                     unify_vars(expected, &found, &mut subst);
                 }
-                substitute(&result, &subst)
+                attach_effects(substitute(&result, &subst), effects)
             }
             Type::Unknown => Type::Unknown,
             other => {
@@ -852,7 +1121,9 @@ impl ModuleChecker<'_> {
         env: &BTreeMap<String, Type>,
     ) -> Type {
         let left_ty = self.infer_expr(left, env);
+        let (left_ty, left_effects) = split_effectful(left_ty);
         let right_ty = self.infer_expr(right, env);
+        let (right_ty, right_effects) = split_effectful(right_ty);
 
         let operator = binary_operator(op, &left_ty, &right_ty);
         self.add_typed_span(
@@ -872,13 +1143,17 @@ impl ModuleChecker<'_> {
                 self.diagnostics
                     .push(Diagnostic::new(right.span(), message));
             }
-            return operator.result;
+            let mut effects = left_effects;
+            effects.extend(right_effects);
+            return attach_effects(operator.result, effects);
         }
 
         self.check_operator_operand(operator.label, left, &left_ty, &operator.params[0]);
         self.check_operator_operand(operator.label, right, &right_ty, &operator.params[1]);
 
-        operator.result
+        let mut effects = left_effects;
+        effects.extend(right_effects);
+        attach_effects(operator.result, effects)
     }
 
     fn infer_callee_expr(&mut self, expr: &Expr, env: &BTreeMap<String, Type>) -> Type {
@@ -916,6 +1191,7 @@ impl ModuleChecker<'_> {
         env: &BTreeMap<String, Type>,
     ) -> Type {
         let base_ty = self.infer_expr(base, env);
+        let (base_ty, base_effects) = split_effectful(base_ty);
         let expanded = self.expand_alias(&base_ty);
         let Type::Row(mut row) = expanded else {
             if !matches!(expanded, Type::Unknown) {
@@ -929,6 +1205,7 @@ impl ModuleChecker<'_> {
             }
             return Type::Unknown;
         };
+        let mut effects = base_effects;
         if row.kind != RowKind::Record {
             self.diagnostics.push(Diagnostic::new(
                 base.span(),
@@ -947,6 +1224,8 @@ impl ModuleChecker<'_> {
                     RowEntry::Case { .. } => Type::Unknown,
                 };
                 let value_ty = self.check_expr(&update.value, env, &expected);
+                let (value_ty, value_effects) = split_effectful(value_ty);
+                effects.extend(value_effects);
                 self.add_typed_span(
                     update.name.span,
                     TypedSpanKind::Field,
@@ -962,14 +1241,18 @@ impl ModuleChecker<'_> {
                     update.name.span,
                     format!("unknown record field `{}`", update.name.text),
                 ));
+                let value_ty = self.infer_expr(&update.value, env);
+                let (_, value_effects) = split_effectful(value_ty);
+                effects.extend(value_effects);
             }
         }
 
-        match base_ty {
+        let result = match base_ty {
             Type::Row(_) => Type::Row(row),
             Type::Named { .. } => base_ty,
             _ => Type::Unknown,
-        }
+        };
+        attach_effects(result, effects)
     }
 
     fn check_pattern(
@@ -1251,7 +1534,27 @@ impl ModuleChecker<'_> {
         for item in &self.module.parsed.module.items {
             match item {
                 Item::Import(_) => {}
-                Item::Effect(_) => {}
+                Item::Effect(decl) => {
+                    self.add_typed_span_display(
+                        decl.name.span,
+                        TypedSpanKind::Effect,
+                        &decl.name.text,
+                        format!("effect {}", decl.name.text),
+                    );
+                    for operation in &decl.operations {
+                        if let Some(ty) = self
+                            .symbol_types
+                            .get(&format!("{}.{}", self.module.name, operation.name.text))
+                        {
+                            self.add_typed_span(
+                                operation.name.span,
+                                TypedSpanKind::Operation,
+                                &operation.name.text,
+                                ty,
+                            );
+                        }
+                    }
+                }
                 Item::Type(decl) => {
                     let ty = Type::Named {
                         name: decl.name.text.clone(),
@@ -1296,12 +1599,22 @@ impl ModuleChecker<'_> {
     }
 
     fn add_typed_span(&mut self, span: Span, kind: TypedSpanKind, label: &str, ty: &Type) {
+        self.add_typed_span_display(span, kind, label, ty.to_string());
+    }
+
+    fn add_typed_span_display(
+        &mut self,
+        span: Span,
+        kind: TypedSpanKind,
+        label: &str,
+        display_type: String,
+    ) {
         self.typed_spans.push(TypedSpan {
             module: self.module.name.clone(),
             span,
             kind,
             label: label.to_string(),
-            display_type: ty.to_string(),
+            display_type,
         });
     }
 }
@@ -2128,6 +2441,13 @@ fn row_kind_name(kind: RowKind) -> &'static str {
     match kind {
         RowKind::Record => "record",
         RowKind::Variant => "variant",
+    }
+}
+
+fn effect_label(effect: &Type) -> String {
+    match effect {
+        Type::Named { name, args } if args.is_empty() => name.clone(),
+        other => other.to_string(),
     }
 }
 
