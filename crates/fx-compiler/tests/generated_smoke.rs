@@ -27,6 +27,7 @@ fn phase_2_5_fixture_executes_observable_main() {
             ),
         ],
         "main",
+        "main",
     );
 
     assert_eq!(output, "Hello, Grace!! phase 2.5");
@@ -72,6 +73,7 @@ export main() : Text
 "#,
         )],
         "main",
+        "main",
     );
 
     assert_eq!(output, "Grace");
@@ -109,6 +111,7 @@ export main() : Text
             ),
         ],
         "main",
+        "main",
     );
 
     assert_eq!(output, "done!!");
@@ -130,12 +133,151 @@ fn phase_2_6_pipeline_and_with_fixture_executes() {
             ),
         ],
         "main",
+        "main",
     );
 
     assert_eq!(output, "([Grace!]) outerctx:inner(body)");
 }
 
-fn compile_and_run_main(prefix: &str, root: &str, files: Vec<SourceFile>, module: &str) -> String {
+#[test]
+fn handled_raise_effect_executes() {
+    let output = compile_and_run_main(
+        "handled_raise_effect",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/main.fx",
+            r#"export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+
+catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
+  handle action()
+    raise(_message, _resume) ->
+      default
+
+    return(value) ->
+      value
+
+export main() : Int
+  with catch(0)
+    safe-divide(10, 0)
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "0");
+}
+
+#[test]
+fn resumptive_choose_effect_executes() {
+    let output = compile_and_run_main(
+        "resumptive_choose_effect",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/main.fx",
+            r#"export effect Choose
+  choose(left: a, right: a) : a
+
+choose-first(action: () -> a with <Choose, ...e>) : a with <...e>
+  handle action()
+    choose(left, _right, resume) ->
+      resume(left)
+
+    return(value) ->
+      value
+
+export main() : Int
+  with choose-first()
+    choose(1, 2) + 10
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "11");
+}
+
+#[test]
+fn phase_3_raise_fixture_executes_observable_value() {
+    let output = compile_and_run_main(
+        "phase_3_raise_fixture",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/effects.fx",
+            include_str!("../../../examples/phase-3/effects.fx"),
+        )],
+        "effects",
+        "value",
+    );
+
+    assert_eq!(output, "0");
+}
+
+#[test]
+fn phase_3_resume_fixture_executes_observable_main() {
+    let output = compile_and_run_main(
+        "phase_3_resume_fixture",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/resume.fx",
+            include_str!("../../../examples/phase-3/resume.fx"),
+        )],
+        "resume",
+        "main",
+    );
+
+    assert_eq!(output, "11");
+}
+
+#[test]
+fn effectful_expression_statements_execute_in_order() {
+    let output = compile_and_run_main(
+        "effectful_expression_statements",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/main.fx",
+            r#"export effect Emit
+  emit(value: Text) : Unit
+
+emit-twice(value: Text) : Unit with <Emit>
+  emit(value ++ "1")
+  emit(value ++ "2")
+  unit
+
+collect(action: () -> Unit with <Emit>) : Text
+  first = ""
+
+  handle action()
+    emit(value, resume) ->
+      resume(unit) ++ value
+
+    return(_value) ->
+      first
+
+export main() : Text
+  with collect()
+    emit-twice("event")
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "event2event1");
+}
+
+fn compile_and_run_main(
+    prefix: &str,
+    root: &str,
+    files: Vec<SourceFile>,
+    module: &str,
+    function: &str,
+) -> String {
     let analysis = analyze_workspace(&PathBuf::from(root), files);
     let session = prepare_compile(analysis, CompileOptions::default()).expect("compile session");
     let program = lower_to_core(&session).expect("core program");
@@ -145,9 +287,10 @@ fn compile_and_run_main(prefix: &str, root: &str, files: Vec<SourceFile>, module
     let output = Command::new("node")
         .arg("-e")
         .arg(format!(
-            "import('{}/{}.mjs').then((m) => console.log(m.__fx_user_main()))",
+            "import('{}/{}.mjs').then((m) => console.log(m.{}()))",
             dir.display(),
-            module
+            module,
+            fx_function_name(function)
         ))
         .output()
         .expect("node executes generated JavaScript");
@@ -165,6 +308,22 @@ fn compile_and_run_main(prefix: &str, root: &str, files: Vec<SourceFile>, module
         .expect("node stdout is utf8")
         .trim()
         .to_string()
+}
+
+fn fx_function_name(name: &str) -> String {
+    let mut output = String::from("__fx_user_");
+    for (index, ch) in name.chars().enumerate() {
+        if (index == 0 && (ch == '_' || ch == '$' || ch.is_ascii_alphabetic()))
+            || (index > 0 && (ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+        {
+            output.push(ch);
+        } else {
+            output.push('_');
+            output.push_str(&(ch as u32).to_string());
+            output.push('_');
+        }
+    }
+    output
 }
 
 fn source(path: &str, source: &str) -> SourceFile {

@@ -1,4 +1,4 @@
-use fx_syntax::ast::{Expr, Item, Pattern, TypeExpr};
+use fx_syntax::ast::{Expr, Item, Pattern, Stmt, TypeExpr};
 use fx_syntax::parse_file;
 
 #[test]
@@ -554,6 +554,26 @@ fn parses_block_lambda_body() {
         panic!("expected lambda");
     };
     assert_eq!(body.statements.len(), 1);
+}
+
+#[test]
+fn parses_expression_statements_before_block_result() {
+    let parsed = parse_file(
+        r#"run() : Unit
+  first()
+  second()
+  unit
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    assert_eq!(value.body.statements.len(), 2);
+    assert!(matches!(value.body.statements[0], Stmt::Expr(_)));
+    assert!(matches!(value.body.statements[1], Stmt::Expr(_)));
+    assert!(matches!(value.body.result.as_ref(), Expr::Unit { .. }));
 }
 
 #[test]

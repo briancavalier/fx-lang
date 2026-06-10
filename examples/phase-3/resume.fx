@@ -19,6 +19,6 @@ choose-second(action: () -> a with <Choose, ...e>) : a with <...e>
     return(value) ->
       value
 
-main() : Int
+export main() : Int
   with choose-first()
     choose(1, 2) + 10

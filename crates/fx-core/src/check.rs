@@ -452,6 +452,11 @@ impl ModuleChecker<'_> {
                     );
                     env.insert(binding.name.text.clone(), ty);
                 }
+                Stmt::Expr(expr) => {
+                    let ty = self.infer_expr(expr, &env);
+                    let (_, expr_effects) = split_effectful(ty);
+                    effects.extend(expr_effects);
+                }
             }
         }
         let result = self.check_expr(&block.result, &env, expected);
@@ -1003,6 +1008,11 @@ impl ModuleChecker<'_> {
                         &ty,
                     );
                     env.insert(binding.name.text.clone(), ty);
+                }
+                Stmt::Expr(expr) => {
+                    let ty = self.infer_expr(expr, &env);
+                    let (_, expr_effects) = split_effectful(ty);
+                    effects.extend(expr_effects);
                 }
             }
         }

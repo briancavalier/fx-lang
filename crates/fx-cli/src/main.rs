@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_phase_3_effect_runtime_before_emitting() {
+    fn compile_outputs_phase_3_effect_runtime() {
         let output = compile_output(&CompileCliOptions {
             path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/phase-3"),
             target: CompileTarget::JavaScript,
@@ -617,11 +617,10 @@ mod tests {
         })
         .expect("compile output");
 
-        assert_eq!(output.exit_code, ExitCode::FAILURE);
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.contains(
-            "unsupported-effect-runtime: effect handlers are not executable until Phase 3.1"
-        ));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.contains("__fx.perform"));
+        assert!(output.stdout.contains("__fx.handle"));
     }
 
     #[test]

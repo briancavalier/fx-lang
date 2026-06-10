@@ -50,6 +50,68 @@ const __fx = Object.freeze({
     }
     return left === right;
   },
+
+  effect(run) {
+    return Object.freeze({
+      __fx_effect: true,
+      run,
+    });
+  },
+
+  pure(value) {
+    return __fx.effect((_handler, continuation) => continuation(value));
+  },
+
+  perform(operation, payload) {
+    return __fx.effect((handler, continuation) => handler({
+      operation,
+      payload,
+      resume(value) {
+        return continuation(value);
+      },
+    }));
+  },
+
+  bind(computation, continuation) {
+    return __fx.effect((handler, finalContinuation) =>
+      __fx.runEffect(computation, handler, (value) =>
+        __fx.runEffect(continuation(value), handler, finalContinuation)
+      )
+    );
+  },
+
+  runEffect(computation, handler, continuation) {
+    if (computation && computation.__fx_effect === true) {
+      return computation.run(handler, continuation);
+    }
+    return continuation(computation);
+  },
+
+  handle(action, spec) {
+    return __fx.effect((outerHandler, continuation) => {
+      const localHandler = (request) => {
+        const clause = spec.operations[request.operation];
+        if (clause === undefined) {
+          return outerHandler(request);
+        }
+        const resume = (value) => __fx.runEffect(request.resume(value), localHandler, continuation);
+        return __fx.runEffect(clause(...request.payload, resume), localHandler, continuation);
+      };
+      return __fx.runEffect(action, localHandler, (value) =>
+        __fx.runEffect(spec.return(value), outerHandler, continuation)
+      );
+    });
+  },
+
+  run(computation) {
+    return __fx.runEffect(
+      computation,
+      (request) => {
+        throw new Error(`Unhandled fx operation ${request.operation}`);
+      },
+      (value) => value
+    );
+  },
 });
 "#;
 
@@ -133,6 +195,65 @@ console.log(JSON.stringify({
             output,
             r#"{"hasNamespace":true,"hasGlobalVariant":"undefined","namespaceFrozen":true}"#
         );
+    }
+
+    #[test]
+    fn runtime_handles_operation_requests_and_returns() {
+        let output = run_node(
+            r#"
+const program = __fx.handle(
+  __fx.perform("main.raise", ["divide by zero"]),
+  {
+    operations: {
+      "main.raise": (_message, _resume) => __fx.pure(0),
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+console.log(__fx.run(program));
+"#,
+        );
+
+        assert_eq!(output, "0");
+    }
+
+    #[test]
+    fn runtime_resumes_operation_continuations() {
+        let output = run_node(
+            r#"
+const program = __fx.handle(
+  __fx.bind(__fx.perform("main.choose", [1, 2]), (value) => __fx.pure(value + 10)),
+  {
+    operations: {
+      "main.choose": (left, _right, resume) => resume(left),
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+console.log(__fx.run(program));
+"#,
+        );
+
+        assert_eq!(output, "11");
+    }
+
+    #[test]
+    fn runtime_reports_unhandled_operations() {
+        let output = run_node(
+            r#"
+try {
+  __fx.run(__fx.perform("main.raise", ["divide by zero"]));
+} catch (error) {
+  console.log(error.message);
+}
+"#,
+        );
+
+        assert_eq!(output, "Unhandled fx operation main.raise");
     }
 
     fn run_node(script: &str) -> String {

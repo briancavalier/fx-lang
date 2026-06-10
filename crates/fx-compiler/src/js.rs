@@ -129,7 +129,13 @@ fn emit_value_decl(
         .iter()
         .map(|param| local_identifier(&param.name))
         .collect::<Vec<_>>();
-    let body = emitter.expr(&declaration.body);
+    let body = if is_effectful_type(&declaration.result_type) {
+        emitter.computation(&declaration.body)
+    } else if needs_effect_runtime(&declaration.body) {
+        format!("__fx.run({})", emitter.computation(&declaration.body))
+    } else {
+        emitter.expr(&declaration.body)
+    };
     source.push_str(&format!(
         "function {name}({}) {{ return {body}; }}\n",
         params.join(", ")
@@ -168,15 +174,27 @@ impl<'a> ExprEmitter<'a> {
                 self.expr(value),
                 self.expr(body)
             ),
-            CoreExprKind::Lambda { params, body } => format!(
-                "(({}) => {})",
-                params
-                    .iter()
-                    .map(|param| local_identifier(&param.name))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+            CoreExprKind::Sequence { value, body } => format!(
+                "(() => {{ {}; return {}; }})()",
+                self.expr(value),
                 self.expr(body)
             ),
+            CoreExprKind::Lambda { params, body } => {
+                let body = if needs_effect_runtime(body) {
+                    self.computation(body)
+                } else {
+                    self.expr(body)
+                };
+                format!(
+                    "(({}) => {})",
+                    params
+                        .iter()
+                        .map(|param| local_identifier(&param.name))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    body
+                )
+            }
             CoreExprKind::Call { callee, args } => format!(
                 "{}({})",
                 self.expr(callee),
@@ -185,6 +203,15 @@ impl<'a> ExprEmitter<'a> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            CoreExprKind::Operation { operation, args } => format!(
+                "__fx.run(__fx.perform({}, [{}]))",
+                operation_key(operation),
+                args.iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CoreExprKind::Handle { .. } => format!("__fx.run({})", self.computation(expr)),
             CoreExprKind::Record { fields } => self.record(fields),
             CoreExprKind::Field { target, field } => {
                 format!("{}[{}]", self.expr(target), string_literal(field))
@@ -239,6 +266,134 @@ impl<'a> ExprEmitter<'a> {
                 }
                 CoreBinaryOp::Subtract => format!("({} - {})", self.expr(left), self.expr(right)),
             },
+        }
+    }
+
+    fn computation(&mut self, expr: &CoreExpr) -> String {
+        match &expr.kind {
+            CoreExprKind::Operation { operation, args } => format!(
+                "__fx.perform({}, [{}])",
+                operation_key(operation),
+                args.iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CoreExprKind::Handle {
+                action,
+                clauses,
+                return_clause,
+            } => {
+                let operations = clauses
+                    .iter()
+                    .map(|clause| {
+                        let params = clause
+                            .params
+                            .iter()
+                            .map(local_identifier)
+                            .chain(std::iter::once(local_identifier(&clause.resume)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "{}: ({}) => {}",
+                            object_key(&display_global(&clause.operation)),
+                            params,
+                            self.computation(&clause.body)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let return_body = return_clause
+                    .as_ref()
+                    .map(|clause| {
+                        format!(
+                            "({}) => {}",
+                            local_identifier(&clause.param),
+                            self.computation(&clause.body)
+                        )
+                    })
+                    .unwrap_or_else(|| "(value) => __fx.pure(value)".to_string());
+                format!(
+                    "__fx.handle({}, {{ operations: {{ {} }}, return: {} }})",
+                    self.computation(action),
+                    operations,
+                    return_body
+                )
+            }
+            CoreExprKind::Let { name, value, body } => {
+                if needs_effect_runtime(value) {
+                    format!(
+                        "__fx.bind({}, ({}) => {})",
+                        self.computation(value),
+                        local_identifier(name),
+                        self.computation(body)
+                    )
+                } else {
+                    format!(
+                        "(() => {{ const {} = {}; return {}; }})()",
+                        local_identifier(name),
+                        self.expr(value),
+                        self.computation(body)
+                    )
+                }
+            }
+            CoreExprKind::Sequence { value, body } => {
+                if needs_effect_runtime(value) {
+                    format!(
+                        "__fx.bind({}, (_ignored) => {})",
+                        self.computation(value),
+                        self.computation(body)
+                    )
+                } else {
+                    format!(
+                        "(() => {{ {}; return {}; }})()",
+                        self.expr(value),
+                        self.computation(body)
+                    )
+                }
+            }
+            CoreExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => format!(
+                "({} ? {} : {})",
+                self.expr(condition),
+                self.computation(then_branch),
+                self.computation(else_branch)
+            ),
+            CoreExprKind::Binary { op, left, right } => {
+                if needs_effect_runtime(left) {
+                    if needs_effect_runtime(right) {
+                        format!(
+                            "__fx.bind({}, (__fx_left) => __fx.bind({}, (__fx_right) => __fx.pure({})))",
+                            self.computation(left),
+                            self.computation(right),
+                            binary_expr(*op, "__fx_left".to_string(), "__fx_right".to_string())
+                        )
+                    } else {
+                        let right = self.expr(right);
+                        format!(
+                            "__fx.bind({}, (__fx_left) => __fx.pure({}))",
+                            self.computation(left),
+                            binary_expr(*op, "__fx_left".to_string(), right)
+                        )
+                    }
+                } else if needs_effect_runtime(right) {
+                    let left = self.expr(left);
+                    format!(
+                        "__fx.bind({}, (__fx_right) => __fx.pure({}))",
+                        self.computation(right),
+                        binary_expr(*op, left, "__fx_right".to_string())
+                    )
+                } else {
+                    format!("__fx.pure({})", self.expr(expr))
+                }
+            }
+            CoreExprKind::Call { .. } if is_effectful_type(&expr.ty) => self.expr(expr),
+            CoreExprKind::Call { callee, .. } if returns_effectful(&callee.ty) => self.expr(expr),
+            _ if is_effectful_type(&expr.ty) => self.expr(expr),
+            _ => format!("__fx.pure({})", self.expr(expr)),
         }
     }
 
@@ -375,6 +530,83 @@ impl<'a> ExprEmitter<'a> {
         let index = self.next_temp;
         self.next_temp += 1;
         format!("__fx_{label}_{index}")
+    }
+}
+
+fn needs_effect_runtime(expr: &CoreExpr) -> bool {
+    match &expr.kind {
+        CoreExprKind::Operation { .. } | CoreExprKind::Handle { .. } => true,
+        CoreExprKind::Call { callee, args } => {
+            returns_effectful(&callee.ty)
+                || needs_effect_runtime(callee)
+                || args.iter().any(needs_effect_runtime)
+        }
+        CoreExprKind::Let { value, body, .. } => {
+            needs_effect_runtime(value) || needs_effect_runtime(body)
+        }
+        CoreExprKind::Sequence { value, body } => {
+            needs_effect_runtime(value) || needs_effect_runtime(body)
+        }
+        CoreExprKind::Lambda { .. } => false,
+        CoreExprKind::Record { fields } => fields
+            .iter()
+            .any(|field| needs_effect_runtime(&field.value)),
+        CoreExprKind::Field { target, .. } => needs_effect_runtime(target),
+        CoreExprKind::RecordUpdate { base, fields } => {
+            needs_effect_runtime(base)
+                || fields
+                    .iter()
+                    .any(|field| needs_effect_runtime(&field.value))
+        }
+        CoreExprKind::Variant { args, .. } | CoreExprKind::List(args) => {
+            args.iter().any(needs_effect_runtime)
+        }
+        CoreExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            needs_effect_runtime(condition)
+                || needs_effect_runtime(then_branch)
+                || needs_effect_runtime(else_branch)
+        }
+        CoreExprKind::Match { scrutinee, arms } => {
+            needs_effect_runtime(scrutinee)
+                || arms.iter().any(|arm| needs_effect_runtime(&arm.value))
+        }
+        CoreExprKind::Binary { left, right, .. } => {
+            needs_effect_runtime(left) || needs_effect_runtime(right)
+        }
+        CoreExprKind::Unit
+        | CoreExprKind::Bool(_)
+        | CoreExprKind::Int(_)
+        | CoreExprKind::Text(_)
+        | CoreExprKind::Local(_)
+        | CoreExprKind::Global(_) => false,
+    }
+}
+
+fn is_effectful_type(ty: &fx_core::Type) -> bool {
+    matches!(ty, fx_core::Type::Effectful { .. })
+}
+
+fn returns_effectful(ty: &fx_core::Type) -> bool {
+    matches!(ty, fx_core::Type::Function(_, result) if is_effectful_type(result))
+}
+
+fn operation_key(name: &CoreGlobalName) -> String {
+    string_literal(&display_global(name))
+}
+
+fn object_key(key: &str) -> String {
+    format!("[{}]", string_literal(key))
+}
+
+fn binary_expr(op: CoreBinaryOp, left: String, right: String) -> String {
+    match op {
+        CoreBinaryOp::Equal => format!("__fx.equal({left}, {right})"),
+        CoreBinaryOp::Concat | CoreBinaryOp::Add => format!("({left} + {right})"),
+        CoreBinaryOp::Subtract => format!("({left} - {right})"),
     }
 }
 

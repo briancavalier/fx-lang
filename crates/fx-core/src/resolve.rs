@@ -198,6 +198,7 @@ impl ModuleResolver<'_> {
                     self.resolve_expr(&binding.value, locals);
                     locals.insert(binding.name.text.clone());
                 }
+                Stmt::Expr(expr) => self.resolve_expr(expr, locals),
             }
         }
         self.resolve_expr(&block.result, locals);

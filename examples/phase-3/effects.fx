@@ -25,6 +25,6 @@ with-fallback(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
   with catch(default)
     action()
 
-value() : Int
+export value() : Int
   with catch(0)
     safe-divide(10, 0)

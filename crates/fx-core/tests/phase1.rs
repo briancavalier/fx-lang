@@ -153,6 +153,11 @@ through-let() : Int with <Raise>
   value = safe-divide(10, 0)
   value + 1
 
+through-expression-statements() : Int with <Raise>
+  safe-divide(10, 0)
+  safe-divide(20, 0)
+  1
+
 through-if(flag: Bool) : Int with <Raise>
   if flag then safe-divide(10, 0) + 1 else 0
 

@@ -138,7 +138,8 @@ Check all Phase 3 examples:
 cargo run -q -p fx-cli -- check examples/phase-3
 ```
 
-JavaScript execution for effectful programs belongs to Phase 3.1. Until then,
-`fx compile --target js` should continue compiling pure earlier-phase programs
-and reject effectful Phase 3 programs with a clear unsupported-effect-runtime
-compiler diagnostic.
+Phase 3.1 adds JavaScript execution for the supported ordinary effect subset:
+operation calls, handlers, handler `return` clauses, explicit `resume`, and
+effectful expression sequencing. `fx compile --target js` should compile these
+fixtures and continue reporting `unsupported-effect-runtime` for checked
+effectful constructs outside the executable subset.

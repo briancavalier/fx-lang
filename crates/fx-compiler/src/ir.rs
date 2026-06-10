@@ -95,6 +95,10 @@ pub enum CoreExprKind {
         value: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
+    Sequence {
+        value: Box<CoreExpr>,
+        body: Box<CoreExpr>,
+    },
     Lambda {
         params: Vec<CoreParam>,
         body: Box<CoreExpr>,
@@ -102,6 +106,15 @@ pub enum CoreExprKind {
     Call {
         callee: Box<CoreExpr>,
         args: Vec<CoreExpr>,
+    },
+    Operation {
+        operation: CoreGlobalName,
+        args: Vec<CoreExpr>,
+    },
+    Handle {
+        action: Box<CoreExpr>,
+        clauses: Vec<CoreHandlerClause>,
+        return_clause: Option<CoreHandlerReturnClause>,
     },
     Record {
         fields: Vec<CoreRecordField>,
@@ -133,6 +146,20 @@ pub enum CoreExprKind {
         left: Box<CoreExpr>,
         right: Box<CoreExpr>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreHandlerClause {
+    pub operation: CoreGlobalName,
+    pub params: Vec<CoreLocalName>,
+    pub resume: CoreLocalName,
+    pub body: Box<CoreExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreHandlerReturnClause {
+    pub param: CoreLocalName,
+    pub body: Box<CoreExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +284,7 @@ impl CoreExpr {
     fn push_debug(&self, output: &mut String, indent: usize) {
         push_line(output, indent, format_args!("expr {}", self.kind.label()));
         match &self.kind {
-            CoreExprKind::Let { value, body, .. } => {
+            CoreExprKind::Let { value, body, .. } | CoreExprKind::Sequence { value, body } => {
                 value.push_debug(output, indent + 1);
                 body.push_debug(output, indent + 1);
             }
@@ -266,6 +293,24 @@ impl CoreExpr {
                 callee.push_debug(output, indent + 1);
                 for arg in args {
                     arg.push_debug(output, indent + 1);
+                }
+            }
+            CoreExprKind::Operation { args, .. } => {
+                for arg in args {
+                    arg.push_debug(output, indent + 1);
+                }
+            }
+            CoreExprKind::Handle {
+                action,
+                clauses,
+                return_clause,
+            } => {
+                action.push_debug(output, indent + 1);
+                for clause in clauses {
+                    clause.body.push_debug(output, indent + 1);
+                }
+                if let Some(return_clause) = return_clause {
+                    return_clause.body.push_debug(output, indent + 1);
                 }
             }
             CoreExprKind::Record { fields } | CoreExprKind::RecordUpdate { fields, .. } => {
@@ -321,8 +366,11 @@ impl CoreExprKind {
             CoreExprKind::Local(_) => "local",
             CoreExprKind::Global(_) => "global",
             CoreExprKind::Let { .. } => "let",
+            CoreExprKind::Sequence { .. } => "sequence",
             CoreExprKind::Lambda { .. } => "lambda",
             CoreExprKind::Call { .. } => "call",
+            CoreExprKind::Operation { .. } => "operation",
+            CoreExprKind::Handle { .. } => "handle",
             CoreExprKind::Record { .. } => "record",
             CoreExprKind::Field { .. } => "field",
             CoreExprKind::RecordUpdate { .. } => "record-update",

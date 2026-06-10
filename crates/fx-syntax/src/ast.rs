@@ -99,6 +99,7 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
     Let(LetStmt),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -180,6 +180,7 @@ impl ModuleLowerer<'_, '_> {
             })
             .collect::<BTreeMap<_, _>>();
         let body = self.lower_block(&decl.body, &mut locals, TailPosition::Tail);
+        self.validate_effect_runtime(&body);
 
         CoreValueDecl {
             name: self.global(&decl.name.text),
@@ -232,6 +233,19 @@ impl ModuleLowerer<'_, '_> {
                     },
                 }
             }
+            Stmt::Expr(expr) => {
+                let value = self.lower_expr(expr, locals, TailPosition::NonTail);
+                let body = self.lower_block_from(statements, index + 1, result, locals, tail);
+                CoreExpr {
+                    ty: body.ty.clone(),
+                    span: value.span.join(body.span),
+                    tail,
+                    kind: CoreExprKind::Sequence {
+                        value: Box::new(value),
+                        body: Box::new(body),
+                    },
+                }
+            }
         }
     }
 
@@ -241,7 +255,7 @@ impl ModuleLowerer<'_, '_> {
         locals: &mut BTreeMap<String, Local>,
         tail: TailPosition,
     ) -> CoreExpr {
-        let ty = self.type_at(expr.span());
+        let ty = self.type_for_expr(expr, locals);
         let kind = match expr {
             Expr::Name(name) => self.lower_name_expr(name, locals),
             Expr::Int { value, .. } => CoreExprKind::Int(*value),
@@ -341,13 +355,12 @@ impl ModuleLowerer<'_, '_> {
                 }
                 return current;
             }
-            Expr::Handle { span, .. } => {
-                self.unsupported_effect_runtime(
-                    *span,
-                    "effect handlers are not executable until Phase 3.1",
-                );
-                CoreExprKind::Unit
-            }
+            Expr::Handle {
+                action,
+                clauses,
+                return_clause,
+                ..
+            } => self.lower_handle_expr(action, clauses, return_clause.as_ref(), locals, tail),
             Expr::Binary {
                 op, left, right, ..
             } => CoreExprKind::Binary {
@@ -429,11 +442,65 @@ impl ModuleLowerer<'_, '_> {
     ) -> CoreExprKind {
         if let Some(constructor) = self.constructor_reference(callee.span()) {
             CoreExprKind::Variant { constructor, args }
+        } else if let Some(operation) = self.operation_reference(callee.span()) {
+            CoreExprKind::Operation { operation, args }
         } else {
             CoreExprKind::Call {
                 callee: Box::new(self.lower_expr(callee, locals, TailPosition::NonTail)),
                 args,
             }
+        }
+    }
+
+    fn lower_handle_expr(
+        &mut self,
+        action: &Expr,
+        clauses: &[HandlerClause],
+        return_clause: Option<&HandlerReturnClause>,
+        locals: &BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExprKind {
+        let action = Box::new(self.lower_expr(action, &mut locals.clone(), TailPosition::NonTail));
+        let clauses = clauses
+            .iter()
+            .map(|clause| {
+                let mut clause_locals = locals.clone();
+                let mut params = clause
+                    .params
+                    .iter()
+                    .map(|param| {
+                        let ty = self.type_at(param.span);
+                        clause_locals.insert(param.text.clone(), Local { ty });
+                        CoreLocalName(param.text.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let resume = params
+                    .pop()
+                    .unwrap_or_else(|| CoreLocalName("_resume".to_string()));
+                let body = self.lower_block(&clause.body, &mut clause_locals, tail);
+                CoreHandlerClause {
+                    operation: self
+                        .operation_reference(clause.operation.span)
+                        .unwrap_or_else(|| self.global(&clause.operation.text)),
+                    params,
+                    resume,
+                    body: Box::new(body),
+                }
+            })
+            .collect();
+        let return_clause = return_clause.map(|clause| {
+            let mut clause_locals = locals.clone();
+            let ty = self.type_at(clause.param.span);
+            clause_locals.insert(clause.param.text.clone(), Local { ty });
+            CoreHandlerReturnClause {
+                param: CoreLocalName(clause.param.text.clone()),
+                body: Box::new(self.lower_block(&clause.body, &mut clause_locals, tail)),
+            }
+        });
+        CoreExprKind::Handle {
+            action,
+            clauses,
+            return_clause,
         }
     }
 
@@ -657,6 +724,27 @@ impl ModuleLowerer<'_, '_> {
             .unwrap_or(Type::Unknown)
     }
 
+    fn type_for_expr(&self, expr: &Expr, locals: &BTreeMap<String, Local>) -> Type {
+        if let Expr::Name(name) = expr
+            && let Some(local) = locals.get(&name.text)
+        {
+            return local.ty.clone();
+        }
+        if let Some(reference) = self.reference_at(expr.span())
+            && let Some(module_types) = self
+                .parent
+                .session
+                .analysis
+                .check
+                .module_types
+                .get(&reference.target.module)
+            && let Some(ty) = module_types.get(&reference.target.name)
+        {
+            return ty.clone();
+        }
+        self.type_at(expr.span())
+    }
+
     fn reference_at(&self, span: Span) -> Option<&fx_core::ResolvedReference> {
         self.parent
             .session
@@ -681,10 +769,167 @@ impl ModuleLowerer<'_, '_> {
         }
     }
 
+    fn operation_reference(&self, span: Span) -> Option<CoreGlobalName> {
+        let reference = self.reference_at(span)?;
+        if reference.target.kind == SymbolKind::Operation {
+            Some(CoreGlobalName {
+                module: reference.target.module.clone(),
+                name: reference.target.name.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     fn global(&self, name: &str) -> CoreGlobalName {
         CoreGlobalName {
             module: self.module.name.clone(),
             name: name.to_string(),
+        }
+    }
+
+    fn validate_effect_runtime(&mut self, expr: &CoreExpr) {
+        match &expr.kind {
+            CoreExprKind::Operation { args, .. } => {
+                for arg in args {
+                    if core_needs_effect_runtime(arg) {
+                        self.unsupported_effect_runtime(
+                            arg.span,
+                            "effectful operation arguments are not executable yet",
+                        );
+                    }
+                    self.validate_effect_runtime(arg);
+                }
+            }
+            CoreExprKind::Handle {
+                action,
+                clauses,
+                return_clause,
+            } => {
+                self.validate_effect_runtime(action);
+                for clause in clauses {
+                    self.validate_effect_runtime(&clause.body);
+                }
+                if let Some(return_clause) = return_clause {
+                    self.validate_effect_runtime(&return_clause.body);
+                }
+            }
+            CoreExprKind::Let { value, body, .. } | CoreExprKind::Sequence { value, body } => {
+                self.validate_effect_runtime(value);
+                self.validate_effect_runtime(body);
+            }
+            CoreExprKind::Lambda { body, .. } => self.validate_effect_runtime(body),
+            CoreExprKind::Call { callee, args } => {
+                if core_needs_effect_runtime(callee) {
+                    self.unsupported_effect_runtime(
+                        callee.span,
+                        "effectful call callees are not executable yet",
+                    );
+                }
+                self.validate_effect_runtime(callee);
+                for arg in args {
+                    if core_needs_effect_runtime(arg) {
+                        self.unsupported_effect_runtime(
+                            arg.span,
+                            "effectful call arguments are not executable yet",
+                        );
+                    }
+                    self.validate_effect_runtime(arg);
+                }
+            }
+            CoreExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                if core_needs_effect_runtime(condition) {
+                    self.unsupported_effect_runtime(
+                        condition.span,
+                        "effectful if conditions are not executable yet",
+                    );
+                }
+                self.validate_effect_runtime(condition);
+                self.validate_effect_runtime(then_branch);
+                self.validate_effect_runtime(else_branch);
+            }
+            CoreExprKind::Binary { left, right, .. } => {
+                self.validate_effect_runtime(left);
+                self.validate_effect_runtime(right);
+            }
+            CoreExprKind::Match { scrutinee, arms } => {
+                if core_needs_effect_runtime(expr) {
+                    self.unsupported_effect_runtime(
+                        expr.span,
+                        "effectful match expressions are not executable yet",
+                    );
+                }
+                self.validate_effect_runtime(scrutinee);
+                for arm in arms {
+                    self.validate_effect_runtime(&arm.value);
+                }
+            }
+            CoreExprKind::Record { fields } => {
+                self.validate_effectful_fields(fields, "effectful record fields");
+            }
+            CoreExprKind::RecordUpdate { base, fields } => {
+                if core_needs_effect_runtime(base) {
+                    self.unsupported_effect_runtime(
+                        base.span,
+                        "effectful record update bases are not executable yet",
+                    );
+                }
+                self.validate_effect_runtime(base);
+                self.validate_effectful_fields(fields, "effectful record update fields");
+            }
+            CoreExprKind::Field { target, .. } => {
+                if core_needs_effect_runtime(target) {
+                    self.unsupported_effect_runtime(
+                        target.span,
+                        "effectful field targets are not executable yet",
+                    );
+                }
+                self.validate_effect_runtime(target);
+            }
+            CoreExprKind::Variant { args, .. } => {
+                for arg in args {
+                    if core_needs_effect_runtime(arg) {
+                        self.unsupported_effect_runtime(
+                            arg.span,
+                            "effectful variant payloads are not executable yet",
+                        );
+                    }
+                    self.validate_effect_runtime(arg);
+                }
+            }
+            CoreExprKind::List(items) => {
+                for item in items {
+                    if core_needs_effect_runtime(item) {
+                        self.unsupported_effect_runtime(
+                            item.span,
+                            "effectful list items are not executable yet",
+                        );
+                    }
+                    self.validate_effect_runtime(item);
+                }
+            }
+            CoreExprKind::Unit
+            | CoreExprKind::Bool(_)
+            | CoreExprKind::Int(_)
+            | CoreExprKind::Text(_)
+            | CoreExprKind::Local(_)
+            | CoreExprKind::Global(_) => {}
+        }
+    }
+
+    fn validate_effectful_fields(&mut self, fields: &[CoreRecordField], message: &str) {
+        for field in fields {
+            if core_needs_effect_runtime(&field.value) {
+                self.unsupported_effect_runtime(
+                    field.value.span,
+                    format!("{message} are not executable yet"),
+                );
+            }
+            self.validate_effect_runtime(&field.value);
         }
     }
 
@@ -712,6 +957,60 @@ fn lower_binary_op(op: BinaryOp) -> CoreBinaryOp {
         BinaryOp::Add => CoreBinaryOp::Add,
         BinaryOp::Subtract => CoreBinaryOp::Subtract,
     }
+}
+
+fn core_needs_effect_runtime(expr: &CoreExpr) -> bool {
+    match &expr.kind {
+        CoreExprKind::Operation { .. } | CoreExprKind::Handle { .. } => true,
+        CoreExprKind::Call { callee, args } => {
+            core_returns_effectful(&callee.ty)
+                || core_needs_effect_runtime(callee)
+                || args.iter().any(core_needs_effect_runtime)
+        }
+        CoreExprKind::Let { value, body, .. } | CoreExprKind::Sequence { value, body } => {
+            core_needs_effect_runtime(value) || core_needs_effect_runtime(body)
+        }
+        CoreExprKind::Lambda { .. } => false,
+        CoreExprKind::Record { fields } => fields
+            .iter()
+            .any(|field| core_needs_effect_runtime(&field.value)),
+        CoreExprKind::Field { target, .. } => core_needs_effect_runtime(target),
+        CoreExprKind::RecordUpdate { base, fields } => {
+            core_needs_effect_runtime(base)
+                || fields
+                    .iter()
+                    .any(|field| core_needs_effect_runtime(&field.value))
+        }
+        CoreExprKind::Variant { args, .. } | CoreExprKind::List(args) => {
+            args.iter().any(core_needs_effect_runtime)
+        }
+        CoreExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            core_needs_effect_runtime(condition)
+                || core_needs_effect_runtime(then_branch)
+                || core_needs_effect_runtime(else_branch)
+        }
+        CoreExprKind::Match { scrutinee, arms } => {
+            core_needs_effect_runtime(scrutinee)
+                || arms.iter().any(|arm| core_needs_effect_runtime(&arm.value))
+        }
+        CoreExprKind::Binary { left, right, .. } => {
+            core_needs_effect_runtime(left) || core_needs_effect_runtime(right)
+        }
+        CoreExprKind::Unit
+        | CoreExprKind::Bool(_)
+        | CoreExprKind::Int(_)
+        | CoreExprKind::Text(_)
+        | CoreExprKind::Local(_)
+        | CoreExprKind::Global(_) => false,
+    }
+}
+
+fn core_returns_effectful(ty: &Type) -> bool {
+    matches!(ty, Type::Function(_, result) if matches!(result.as_ref(), Type::Effectful { .. }))
 }
 
 fn parse_display_type(display: &str) -> Type {
@@ -872,6 +1171,64 @@ mod tests {
         assert!(diagnostic.span.start < diagnostic.span.end);
     }
 
+    #[test]
+    fn rejects_accepted_but_unsupported_effectful_list_items() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples/phase-3"),
+            vec![source(
+                "examples/phase-3/unsupported.fx",
+                r#"export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+
+bad() : List Int with <Raise>
+  [safe-divide(10, 0)]
+"#,
+            )],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+
+        let diagnostics = lower_to_core(&session).expect_err("compiler diagnostics");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("unsupported-effect-runtime: effectful list items")
+        }));
+    }
+
+    #[test]
+    fn debug_tree_exposes_lowered_effect_control() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples/phase-3"),
+            vec![source(
+                "examples/phase-3/effects.fx",
+                r#"export effect Raise
+  raise(message: Text) : a
+
+safe-divide(x: Int, y: Int) : Int with <Raise>
+  if y == 0 then raise("divide by zero") else x
+
+catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
+  handle action()
+    raise(_message, _resume) ->
+      default
+
+    return(value) ->
+      value
+"#,
+            )],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+        let program = lower_to_core(&session).expect("core program");
+        let tree = program.debug_tree();
+
+        assert!(tree.contains("expr handle"));
+        assert!(tree.contains("expr operation"));
+    }
+
     fn phase_2_5_session() -> crate::CompileSession {
         let analysis = analyze_workspace(
             &PathBuf::from("examples/phase-2.5"),
@@ -909,7 +1266,26 @@ mod tests {
                         CoreExprKind::Global(global) if global.name == name
                     )
             }
+            CoreExprKind::Operation { args, .. } => {
+                args.iter().any(|arg| contains_tail_call_to(arg, name))
+            }
+            CoreExprKind::Handle {
+                action,
+                clauses,
+                return_clause,
+            } => {
+                contains_tail_call_to(action, name)
+                    || clauses
+                        .iter()
+                        .any(|clause| contains_tail_call_to(&clause.body, name))
+                    || return_clause
+                        .as_ref()
+                        .is_some_and(|clause| contains_tail_call_to(&clause.body, name))
+            }
             CoreExprKind::Let { value, body, .. } => {
+                contains_tail_call_to(value, name) || contains_tail_call_to(body, name)
+            }
+            CoreExprKind::Sequence { value, body } => {
                 contains_tail_call_to(value, name) || contains_tail_call_to(body, name)
             }
             CoreExprKind::Lambda { body, .. } => contains_tail_call_to(body, name),

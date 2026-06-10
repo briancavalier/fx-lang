@@ -197,6 +197,13 @@ fn local_definition_in_block(
                 }
                 locals.insert(binding.name.text.clone(), definition);
             }
+            Stmt::Expr(expr) => {
+                if let Some(definition) =
+                    local_definition_in_expr(expr, byte_offset, locals, module)
+                {
+                    return Some(definition);
+                }
+            }
         }
     }
     local_definition_in_expr(&block.result, byte_offset, locals, module)

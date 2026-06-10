@@ -237,16 +237,21 @@ impl Parser {
         self.skip_newlines();
         let start = self.peek().span.start;
         let mut statements = Vec::new();
-        let mut exprs = Vec::new();
+        let mut pending_result = None;
         while !self.at(TokenKind::Dedent) && !self.at(TokenKind::Eof) {
             if self.starts_let_stmt() {
+                if let Some(expr) = pending_result.take() {
+                    statements.push(Stmt::Expr(expr));
+                }
                 statements.push(Stmt::Let(self.let_stmt()));
             } else {
-                exprs.push(self.expr());
+                if let Some(expr) = pending_result.replace(self.expr()) {
+                    statements.push(Stmt::Expr(expr));
+                }
             }
             self.skip_newlines();
         }
-        let result = exprs.pop().unwrap_or(Expr::Unit {
+        let result = pending_result.unwrap_or(Expr::Unit {
             span: Span::point(start),
         });
         let end = result.span().end;
