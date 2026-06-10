@@ -347,6 +347,68 @@ value : Int
     safe-divide(10, 0)
 ```
 
+## Phase 3.1: JavaScript effects runtime
+
+Goal: make Phase 3 effectful programs executable through the existing
+`fx compile --target js` path.
+
+This phase adds runtime support for ordinary algebraic effects after Phase 3
+has stabilized the surface syntax, effect-row checking, operation resolution,
+handler typing, diagnostics, and language-server behavior. Phase 3 itself may
+accept effectful programs for checking while the compiler rejects them with a
+clear unsupported-effect-runtime diagnostic.
+
+Include:
+
+- compiler IR and lowering support for operation calls, handlers, `return`
+  clauses, and explicit `resume`;
+- a small JavaScript runtime protocol for operation requests, handler dispatch,
+  resumptions, and ordinary returns;
+- JavaScript emission for the supported Phase 3 effect subset;
+- runnable Node smoke tests for handled `Raise` and at least one resumptive
+  handler;
+- compiler diagnostics for accepted-but-not-yet-executable effect constructs.
+
+Defer:
+
+- scoped effects and named scopes;
+- coeffects and `given`;
+- effect masking;
+- handler literals unless needed as an implementation target;
+- advanced laws or restrictions around multi-shot resumptions;
+- production packaging, bundling, source maps, optimization, and non-JavaScript
+  targets.
+
+Compiler success criteria:
+
+- pure Phase 1, Phase 2, Phase 2.5, and Phase 2.6 programs keep compiling and
+  running as before;
+- `fx compile --target js` rejects unsupported effectful programs before
+  emission with compiler diagnostics distinct from parser and checker
+  diagnostics;
+- supported Phase 3 effect examples compile to JavaScript and run under Node;
+- generated JavaScript correctly handles operation requests, handler dispatch,
+  ordinary returns, and explicit `resume` for the supported subset.
+
+Example target:
+
+```fx
+export effect Choose
+  choose(left: a, right: a) : a
+
+choose-first(action: () -> a with <Choose, ...e>) : a with <...e>
+  handle action()
+    choose(left, _right, resume) ->
+      resume(left)
+
+    return(value) ->
+      value
+
+main : Int
+  with choose-first()
+    choose(1, 2) + 10
+```
+
 ## Phase 3.5: Formatter tooling
 
 Goal: add an opinionated formatter after effect syntax is accepted, but before
