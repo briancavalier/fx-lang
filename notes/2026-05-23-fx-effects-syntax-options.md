@@ -332,6 +332,12 @@ Effect rows list effect names/capabilities only, such as `<Raise>` or `<Emit a>`
 
 `with` is general trailing-action sugar for any function whose final parameter is an action/thunk. The type checker rejects `with` when the target function's final parameter is not an action.
 
+Phase 2.6 adopts this prefix `with` form before effects and allows flat stacked
+`with` headers. It also allows data-last pipeline targets, so
+`with config |> with-logger(level) body` desugars as
+`with-logger(level, config, () -> body)`. Postfix `expr with body` is not part
+of v0.
+
 V0 context rows use unique plain field names, aligned with record rows. Functions that need two contextual values with the same conceptual role should give them distinct names, such as `eq-a` and `eq-b`; qualified context names are deferred.
 
 ### Combined option 2: one `requires` clause

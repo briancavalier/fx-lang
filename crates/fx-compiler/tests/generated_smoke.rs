@@ -114,6 +114,27 @@ export main() : Text
     assert_eq!(output, "done!!");
 }
 
+#[test]
+fn phase_2_6_pipeline_and_with_fixture_executes() {
+    let output = compile_and_run_main(
+        "phase_2_6_fixture",
+        "examples/phase-2.6",
+        vec![
+            source(
+                "examples/phase-2.6/support.fx",
+                include_str!("../../../examples/phase-2.6/support.fx"),
+            ),
+            source(
+                "examples/phase-2.6/main.fx",
+                include_str!("../../../examples/phase-2.6/main.fx"),
+            ),
+        ],
+        "main",
+    );
+
+    assert_eq!(output, "([Grace!]) outerctx:inner(body)");
+}
+
 fn compile_and_run_main(prefix: &str, root: &str, files: Vec<SourceFile>, module: &str) -> String {
     let analysis = analyze_workspace(&PathBuf::from(root), files);
     let session = prepare_compile(analysis, CompileOptions::default()).expect("compile session");

@@ -959,6 +959,85 @@ main() : Int
 }
 
 #[test]
+fn checks_data_last_pipeline_calls() {
+    let result = check_single(
+        "pipeline.fx",
+        r#"append-suffix(suffix: Text, value: Text) : Text
+  value ++ suffix
+
+wrap(prefix: Text, suffix: Text, value: Text) : Text
+  prefix ++ value ++ suffix
+
+main() : Text
+  "Grace" |> append-suffix("!") |> wrap("[", "]")
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_pipeline_final_argument_mismatches() {
+    let result = check_single(
+        "pipeline.fx",
+        r#"needs-int(prefix: Text, value: Int) : Text
+  prefix
+
+bad() : Text
+  "not-int" |> needs-int("value")
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("expected `Int`, found `Text`") })
+    );
+}
+
+#[test]
+fn checks_prefix_with_and_flat_stacked_with() {
+    let result = check_single(
+        "with.fx",
+        r#"surround(prefix: Text, suffix: Text, action: () -> Text) : Text
+  prefix ++ action() ++ suffix
+
+surround-value(prefix: Text, value: Text, action: () -> Text) : Text
+  prefix ++ value ++ ":" ++ action()
+
+main() : Text
+  with "ctx" |> surround-value("outer")
+  with surround("inner(", ")")
+    "body"
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_invalid_with_targets() {
+    let result = check_single(
+        "with.fx",
+        r#"not-handler(value: Text) : Text
+  value
+
+bad() : Text
+  with not-handler("value")
+    "body"
+"#,
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("arity mismatch"))
+    );
+}
+
+#[test]
 fn checks_calls_through_lambda_valued_locals() {
     let result = check_single(
         "lambda.fx",

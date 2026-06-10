@@ -151,6 +151,22 @@ map(f, xs)
 print-line("hello")
 ```
 
+Data-last pipeline sugar appends the piped value to the rightmost ordinary call
+argument position:
+
+```fx
+xs |> map(render) |> join(", ")
+```
+
+desugars to:
+
+```fx
+join(", ", map(render, xs))
+```
+
+Pipeline does not provide receiver semantics. Koka-style dot receiver
+application may be considered later as a separate feature.
+
 Lambdas stay lightweight:
 
 ```fx

@@ -189,6 +189,80 @@ fn parses_phase_2_5_executable_fixtures() {
 }
 
 #[test]
+fn parses_phase_2_6_pipeline_and_with_fixtures() {
+    for source in [
+        include_str!("../../../examples/phase-2.6/support.fx"),
+        include_str!("../../../examples/phase-2.6/main.fx"),
+    ] {
+        let parsed = parse_file(source);
+
+        assert_eq!(parsed.diagnostics, []);
+    }
+}
+
+#[test]
+fn parses_pipeline_as_left_associative_data_last_sugar() {
+    let parsed = parse_file(
+        r#"main() : Text
+  "Grace" |> append-suffix("!") |> wrap("[", "]")
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    let Expr::Pipeline {
+        value: left,
+        target,
+        ..
+    } = value.body.result.as_ref()
+    else {
+        panic!("expected outer pipeline");
+    };
+    assert!(matches!(left.as_ref(), Expr::Pipeline { .. }));
+    assert!(matches!(target.as_ref(), Expr::Call { .. }));
+}
+
+#[test]
+fn parses_prefix_with_and_flat_stacked_with_headers() {
+    let parsed = parse_file(
+        r#"main() : Text
+  with "ctx" |> surround-value("outer")
+  with surround("inner(", ")")
+    "body"
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(value) = &parsed.module.items[0] else {
+        panic!("expected value");
+    };
+    let Expr::With { targets, body, .. } = value.body.result.as_ref() else {
+        panic!("expected with expression");
+    };
+    assert_eq!(targets.len(), 2);
+    assert!(matches!(targets[0].target, Expr::Pipeline { .. }));
+    assert!(matches!(body.result.as_ref(), Expr::Text { .. }));
+}
+
+#[test]
+fn rejects_postfix_with() {
+    let parsed = parse_file(
+        r#"main() : Text
+  "Grace" |> append-suffix("!") with
+    "ignored"
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("postfix `with` is not supported")
+    }));
+}
+
+#[test]
 fn parses_match_with_list_rest_pattern() {
     let parsed = parse_file(
         r#"head(xs: List Int) : Int

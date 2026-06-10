@@ -215,13 +215,20 @@ impl Parser {
     fn expr(&mut self) -> Expr {
         if self.starts_lambda_expr() {
             self.lambda_expr()
+        } else if self.at_keyword(Keyword::With) {
+            self.with_expr()
         } else {
-            self.binary_expr(0)
+            let expr = self.binary_expr(0);
+            if self.at_keyword(Keyword::With) {
+                self.error_here("postfix `with` is not supported; use prefix `with target`");
+                self.bump();
+            }
+            expr
         }
     }
 
     fn binary_expr(&mut self, min_prec: u8) -> Expr {
-        let mut left = self.postfix_expr();
+        let mut left = self.pipeline_expr();
         while let Some((op, prec)) = self.binary_op() {
             if prec < min_prec {
                 break;
@@ -234,6 +241,22 @@ impl Parser {
                 op_span,
                 left: Box::new(left),
                 right: Box::new(right),
+                span,
+            };
+        }
+        left
+    }
+
+    fn pipeline_expr(&mut self) -> Expr {
+        let mut left = self.postfix_expr();
+        while self.at(TokenKind::PipeGreater) {
+            let op_span = self.bump().span;
+            let target = self.postfix_expr();
+            let span = left.span().join(target.span());
+            left = Expr::Pipeline {
+                value: Box::new(left),
+                op_span,
+                target: Box::new(target),
                 span,
             };
         }
@@ -293,6 +316,7 @@ impl Parser {
                 let span = self.bump().span;
                 Expr::Unit { span }
             }
+            TokenKind::Keyword(Keyword::With) => self.with_expr(),
             TokenKind::Ident(_) => {
                 let name = self
                     .expect_ident("expected name")
@@ -315,6 +339,32 @@ impl Parser {
                     .push(Diagnostic::new(span, "expected expression"));
                 Expr::Error { span }
             }
+        }
+    }
+
+    fn with_expr(&mut self) -> Expr {
+        let start = self.peek().span.start;
+        let mut targets = Vec::new();
+        loop {
+            let with_span = self.expect_keyword(Keyword::With, "expected `with`");
+            let target = self.expr();
+            targets.push(WithTarget {
+                span: with_span.join(target.span()),
+                target,
+            });
+            self.expect_newline("expected newline after `with` target");
+            if !self.at_keyword(Keyword::With) {
+                break;
+            }
+        }
+        self.expect(TokenKind::Indent, "expected indented `with` body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of `with` body");
+        let span = Span::new(start, body.span.end);
+        Expr::With {
+            targets,
+            body,
+            span,
         }
     }
 
@@ -1059,7 +1109,6 @@ impl Parser {
                 | TokenKind::Keyword(Keyword::Handle)
                 | TokenKind::Keyword(Keyword::Given)
                 | TokenKind::Keyword(Keyword::Scope)
-                | TokenKind::Keyword(Keyword::With)
         )
     }
 

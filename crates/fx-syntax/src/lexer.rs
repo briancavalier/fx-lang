@@ -27,6 +27,7 @@ pub(crate) enum TokenKind {
     Colon,
     Comma,
     Dot,
+    PipeGreater,
     Equal,
     Arrow,
     PlusPlus,
@@ -130,6 +131,13 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             b'>' => single(&mut tokens, TokenKind::RAngle, start, &mut i),
             b':' => single(&mut tokens, TokenKind::Colon, start, &mut i),
             b',' => single(&mut tokens, TokenKind::Comma, start, &mut i),
+            b'|' if bytes.get(i + 1) == Some(&b'>') => {
+                i += 2;
+                tokens.push(Token {
+                    kind: TokenKind::PipeGreater,
+                    span: Span::new(start, i),
+                });
+            }
             b'=' if bytes.get(i + 1) == Some(&b'=') => {
                 i += 2;
                 tokens.push(Token {

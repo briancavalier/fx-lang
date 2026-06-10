@@ -296,23 +296,7 @@ impl ModuleLowerer<'_, '_> {
             }
             Expr::Field { .. } => self.lower_resolved_global_expr(expr.span()),
             Expr::Call { callee, args, .. } => {
-                if let Some(constructor) = self.constructor_reference(callee.span()) {
-                    CoreExprKind::Variant {
-                        constructor,
-                        args: args
-                            .iter()
-                            .map(|arg| self.lower_expr(arg, locals, TailPosition::NonTail))
-                            .collect(),
-                    }
-                } else {
-                    CoreExprKind::Call {
-                        callee: Box::new(self.lower_expr(callee, locals, TailPosition::NonTail)),
-                        args: args
-                            .iter()
-                            .map(|arg| self.lower_expr(arg, locals, TailPosition::NonTail))
-                            .collect(),
-                    }
-                }
+                return self.lower_call_expr(callee, args, Vec::new(), expr.span(), locals, tail);
             }
             Expr::If {
                 condition,
@@ -338,6 +322,24 @@ impl ModuleLowerer<'_, '_> {
                     })
                     .collect(),
             },
+            Expr::Pipeline { value, target, .. } => {
+                let value = self.lower_expr(value, locals, TailPosition::NonTail);
+                return self.lower_sugared_call(target, vec![value], expr.span(), locals, tail);
+            }
+            Expr::With { targets, body, .. } => {
+                let mut current = self.lower_block(body, &mut locals.clone(), TailPosition::Tail);
+                for target in targets.iter().rev() {
+                    let action = self.action_lambda(target.span, current);
+                    current = self.lower_sugared_call(
+                        &target.target,
+                        vec![action],
+                        target.span,
+                        locals,
+                        tail,
+                    );
+                }
+                return current;
+            }
             Expr::Binary {
                 op, left, right, ..
             } => CoreExprKind::Binary {
@@ -356,6 +358,86 @@ impl ModuleLowerer<'_, '_> {
             span: expr.span(),
             tail,
             kind,
+        }
+    }
+
+    fn lower_call_expr(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        trailing: Vec<CoreExpr>,
+        span: Span,
+        locals: &mut BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExpr {
+        let mut lowered_args = args
+            .iter()
+            .map(|arg| self.lower_expr(arg, locals, TailPosition::NonTail))
+            .collect::<Vec<_>>();
+        lowered_args.extend(trailing);
+        let kind = self.lower_call_kind(callee, lowered_args, locals);
+        CoreExpr {
+            ty: self.type_at(span),
+            span,
+            tail,
+            kind,
+        }
+    }
+
+    fn lower_sugared_call(
+        &mut self,
+        target: &Expr,
+        trailing: Vec<CoreExpr>,
+        span: Span,
+        locals: &mut BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExpr {
+        match target {
+            Expr::Pipeline { value, target, .. } => {
+                let mut args = vec![self.lower_expr(value, locals, TailPosition::NonTail)];
+                args.extend(trailing);
+                self.lower_sugared_call(target, args, span, locals, tail)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.lower_call_expr(callee, args, trailing, span, locals, tail)
+            }
+            other => {
+                let kind = self.lower_call_kind(other, trailing, locals);
+                CoreExpr {
+                    ty: self.type_at(span),
+                    span,
+                    tail,
+                    kind,
+                }
+            }
+        }
+    }
+
+    fn lower_call_kind(
+        &mut self,
+        callee: &Expr,
+        args: Vec<CoreExpr>,
+        locals: &mut BTreeMap<String, Local>,
+    ) -> CoreExprKind {
+        if let Some(constructor) = self.constructor_reference(callee.span()) {
+            CoreExprKind::Variant { constructor, args }
+        } else {
+            CoreExprKind::Call {
+                callee: Box::new(self.lower_expr(callee, locals, TailPosition::NonTail)),
+                args,
+            }
+        }
+    }
+
+    fn action_lambda(&mut self, span: Span, body: CoreExpr) -> CoreExpr {
+        CoreExpr {
+            ty: Type::Function(Vec::new(), Box::new(body.ty.clone())),
+            span,
+            tail: TailPosition::NonTail,
+            kind: CoreExprKind::Lambda {
+                params: Vec::new(),
+                body: Box::new(body),
+            },
         }
     }
 

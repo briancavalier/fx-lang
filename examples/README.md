@@ -96,3 +96,30 @@ Write executable ESM files for Node:
 cargo run -q -p fx-cli -- compile --target js --out-dir /tmp/fxl-phase-2.5 examples/phase-2.5
 node -e "import('/tmp/fxl-phase-2.5/main.mjs').then((m) => console.log(m.__fx_user_main()))"
 ```
+
+## Phase 2.6
+
+Phase 2.6 examples exercise data-last pipeline calls and prefix `with`
+trailing-action sugar:
+
+- `phase-2.6/support.fx`
+- `phase-2.6/main.fx`
+
+Check all Phase 2.6 examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-2.6
+```
+
+Compile all Phase 2.6 examples to JavaScript:
+
+```sh
+cargo run -q -p fx-cli -- compile --target js examples/phase-2.6
+```
+
+Write executable ESM files for Node:
+
+```sh
+cargo run -q -p fx-cli -- compile --target js --out-dir /tmp/fxl-phase-2.6 examples/phase-2.6
+node -e "import('/tmp/fxl-phase-2.6/main.mjs').then((m) => console.log(m.__fx_user_main()))"
+```

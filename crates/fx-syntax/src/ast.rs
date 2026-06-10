@@ -217,6 +217,17 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         span: Span,
     },
+    Pipeline {
+        value: Box<Expr>,
+        op_span: Span,
+        target: Box<Expr>,
+        span: Span,
+    },
+    With {
+        targets: Vec<WithTarget>,
+        body: Block,
+        span: Span,
+    },
     Binary {
         op: BinaryOp,
         op_span: Span,
@@ -245,10 +256,18 @@ impl Expr {
             | Expr::Call { span, .. }
             | Expr::If { span, .. }
             | Expr::Match { span, .. }
+            | Expr::Pipeline { span, .. }
+            | Expr::With { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Error { span } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WithTarget {
+    pub target: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

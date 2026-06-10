@@ -125,6 +125,11 @@ enum NameUse {
     Callee,
 }
 
+enum CallArg<'a> {
+    Expr(&'a Expr),
+    Synthetic { ty: Type, span: Span },
+}
+
 pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let resolved = resolve_workspace(graph);
     let mut diagnostics = resolved.diagnostics;
@@ -392,6 +397,7 @@ impl ModuleChecker<'_> {
                 }
                 expected.clone()
             }
+            Expr::With { .. } => self.check_inferred_expr(expr, env, expected),
             _ => self.check_inferred_expr(expr, env, expected),
         }
     }
@@ -530,32 +536,7 @@ impl ModuleChecker<'_> {
                 }
             }
             Expr::Call { callee, args, span } => match self.infer_callee_expr(callee, env) {
-                Type::Function(params, result) => {
-                    if params.len() != args.len() {
-                        self.diagnostics.push(Diagnostic::new(
-                            *span,
-                            format!(
-                                "arity mismatch: expected {} arguments, found {}",
-                                params.len(),
-                                args.len()
-                            ),
-                        ));
-                    }
-                    let mut subst = Substitution::default();
-                    for (arg, expected) in args.iter().zip(params.iter()) {
-                        let found = self.check_expr(arg, env, expected);
-                        unify_vars(expected, &found, &mut subst);
-                    }
-                    substitute(&result, &subst)
-                }
-                Type::Unknown => Type::Unknown,
-                other => {
-                    self.diagnostics.push(Diagnostic::new(
-                        callee.span(),
-                        format!("cannot call non-function value of type `{other}`"),
-                    ));
-                    Type::Unknown
-                }
+                callee_ty => self.infer_call_type(callee_ty, callee.span(), args, *span, env),
             },
             Expr::If {
                 condition,
@@ -612,6 +593,17 @@ impl ModuleChecker<'_> {
                 }
                 found
             }
+            Expr::Pipeline {
+                value,
+                op_span,
+                target,
+                span,
+            } => self.infer_pipeline_expr(value, *op_span, target, *span, env),
+            Expr::With {
+                targets,
+                body,
+                span,
+            } => self.infer_with_expr(targets, body, *span, env),
             Expr::Binary {
                 op,
                 op_span,
@@ -620,6 +612,171 @@ impl ModuleChecker<'_> {
                 ..
             } => self.infer_binary_expr(*op, *op_span, left, right, env),
             Expr::Error { .. } => Type::Unknown,
+        }
+    }
+
+    fn infer_pipeline_expr(
+        &mut self,
+        value: &Expr,
+        op_span: Span,
+        target: &Expr,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        self.add_typed_span(
+            op_span,
+            TypedSpanKind::Value,
+            "|>",
+            &Type::Function(
+                vec![
+                    Type::Var(TypeVar::unscoped("a")),
+                    Type::Function(
+                        vec![Type::Var(TypeVar::unscoped("a"))],
+                        Box::new(Type::Var(TypeVar::unscoped("b"))),
+                    ),
+                ],
+                Box::new(Type::Var(TypeVar::unscoped("b"))),
+            ),
+        );
+        self.infer_sugared_call(target, vec![CallArg::Expr(value)], span, env)
+    }
+
+    fn infer_with_expr(
+        &mut self,
+        targets: &[WithTarget],
+        body: &Block,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let mut result = self.infer_block(body, env);
+        for target in targets.iter().rev() {
+            let action_ty = Type::Function(Vec::new(), Box::new(result));
+            result = self.infer_sugared_call(
+                &target.target,
+                vec![CallArg::Synthetic {
+                    ty: action_ty,
+                    span: target.span,
+                }],
+                span,
+                env,
+            );
+        }
+        result
+    }
+
+    fn infer_block(&mut self, block: &Block, env: &BTreeMap<String, Type>) -> Type {
+        let mut env = env.clone();
+        for statement in &block.statements {
+            match statement {
+                Stmt::Let(binding) => {
+                    let ty = self.infer_expr(&binding.value, &env);
+                    self.add_typed_span(
+                        binding.name.span,
+                        TypedSpanKind::Local,
+                        &binding.name.text,
+                        &ty,
+                    );
+                    env.insert(binding.name.text.clone(), ty);
+                }
+            }
+        }
+        self.infer_expr(&block.result, &env)
+    }
+
+    fn infer_sugared_call(
+        &mut self,
+        target: &Expr,
+        trailing: Vec<CallArg<'_>>,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        match target {
+            Expr::Pipeline {
+                value,
+                target,
+                span,
+                ..
+            } => {
+                let mut args = vec![CallArg::Expr(value)];
+                args.extend(trailing);
+                self.infer_sugared_call(target, args, *span, env)
+            }
+            Expr::Call { callee, args, .. } => {
+                let args = args
+                    .iter()
+                    .map(CallArg::Expr)
+                    .chain(trailing)
+                    .collect::<Vec<_>>();
+                let callee_ty = self.infer_callee_expr(callee, env);
+                self.infer_sugared_call_type(callee_ty, callee.span(), &args, span, env)
+            }
+            other => {
+                let callee_ty = self.infer_callee_expr(other, env);
+                self.infer_sugared_call_type(callee_ty, other.span(), &trailing, span, env)
+            }
+        }
+    }
+
+    fn infer_call_type(
+        &mut self,
+        callee_ty: Type,
+        callee_span: Span,
+        args: &[Expr],
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let args = args.iter().map(CallArg::Expr).collect::<Vec<_>>();
+        self.infer_sugared_call_type(callee_ty, callee_span, &args, span, env)
+    }
+
+    fn infer_sugared_call_type(
+        &mut self,
+        callee_ty: Type,
+        callee_span: Span,
+        args: &[CallArg<'_>],
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        match callee_ty {
+            Type::Function(params, result) => {
+                if params.len() != args.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!(
+                            "arity mismatch: expected {} arguments, found {}",
+                            params.len(),
+                            args.len()
+                        ),
+                    ));
+                }
+                let mut subst = Substitution::default();
+                for (arg, expected) in args.iter().zip(params.iter()) {
+                    let found = match arg {
+                        CallArg::Expr(expr) => self.check_expr(expr, env, expected),
+                        CallArg::Synthetic { ty, span } => {
+                            if !self.compatible(ty, expected) {
+                                let message = self.compatibility_message(
+                                    ty,
+                                    expected,
+                                    format!("expected `{expected}`, found `{ty}`"),
+                                );
+                                self.diagnostics.push(Diagnostic::new(*span, message));
+                            }
+                            ty.clone()
+                        }
+                    };
+                    unify_vars(expected, &found, &mut subst);
+                }
+                substitute(&result, &subst)
+            }
+            Type::Unknown => Type::Unknown,
+            other => {
+                self.diagnostics.push(Diagnostic::new(
+                    callee_span,
+                    format!("cannot call non-function value of type `{other}`"),
+                ));
+                Type::Unknown
+            }
         }
     }
 

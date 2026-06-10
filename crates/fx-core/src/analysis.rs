@@ -274,6 +274,16 @@ fn local_definition_in_expr(
                     })
             })
         }),
+        Expr::Pipeline { value, target, .. } => {
+            local_definition_in_expr(value, byte_offset, locals, module)
+                .or_else(|| local_definition_in_expr(target, byte_offset, locals, module))
+        }
+        Expr::With { targets, body, .. } => targets
+            .iter()
+            .find_map(|target| {
+                local_definition_in_expr(&target.target, byte_offset, locals, module)
+            })
+            .or_else(|| local_definition_in_block(body, byte_offset, &mut locals.clone(), module)),
         Expr::Binary { left, right, .. } => {
             local_definition_in_expr(left, byte_offset, locals, module)
                 .or_else(|| local_definition_in_expr(right, byte_offset, locals, module))

@@ -255,6 +255,16 @@ impl ModuleResolver<'_> {
                     self.resolve_expr(&arm.value, &mut arm_locals);
                 }
             }
+            Expr::Pipeline { value, target, .. } => {
+                self.resolve_expr(value, locals);
+                self.resolve_expr(target, locals);
+            }
+            Expr::With { targets, body, .. } => {
+                for target in targets {
+                    self.resolve_expr(&target.target, locals);
+                }
+                self.resolve_block(body, &mut locals.clone());
+            }
             Expr::Binary { left, right, .. } => {
                 self.resolve_expr(left, locals);
                 self.resolve_expr(right, locals);

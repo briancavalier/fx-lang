@@ -241,6 +241,39 @@ main : Text
   message(Ok("Grace"))
 ```
 
+## Phase 2.6: Data-last pipeline and prefix `with`
+
+Goal: add small pure surface conveniences before effects.
+
+This phase introduces no effect semantics. It only adds syntax that desugars to
+existing calls and lambdas so Phase 3 examples can stay readable without adding
+new runtime concepts.
+
+Include:
+
+- data-last pipeline calls, such as `value |> f(arg)`, desugaring to
+  `f(arg, value)`;
+- prefix trailing-action sugar, such as `with f(args) body`, desugaring to
+  `f(args, () -> body)`;
+- flat stacked `with` headers that desugar outermost-first;
+- examples under `examples/phase-2.6/` that compile and run through the
+  JavaScript backend.
+
+Defer:
+
+- effect declarations, effect rows, handlers, resumptions, scoped effects, and
+  coeffects;
+- postfix `with`;
+- placeholders, partial application, function composition, receiver sugar, and
+  Koka-style dot application.
+
+Success criteria:
+
+- parser, checker, LSP-adjacent typed spans, compiler lowering, JavaScript
+  emission, and CLI compile support the new sugar;
+- `|>` and prefix `with` behave like their explicit call/lambda desugarings;
+- generated JavaScript for Phase 2.6 examples runs under Node.
+
 ## Phase 3: Effects
 
 Goal: ordinary algebraic effect declarations and effect rows.
