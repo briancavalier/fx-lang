@@ -347,6 +347,45 @@ value : Int
     safe-divide(10, 0)
 ```
 
+## Phase 3.5: Formatter tooling
+
+Goal: add an opinionated formatter after effect syntax is accepted, but before
+scoped effects and coeffects add more surface area.
+
+This phase should introduce formatter infrastructure deliberately rather than
+building a lossy AST pretty-printer. The formatter must preserve comments and
+produce stable, idempotent output.
+
+Include:
+
+- lexer or syntax-tree support for comments and other source trivia needed by
+  formatting;
+- a formatter API in the syntax/tooling layer that can format a parsed module;
+- an `fx fmt` command that formats one file or every `.fx` file under a
+  directory;
+- a check mode, such as `fx fmt --check`, for CI and examples;
+- opinionated rules for indentation, blank lines, imports, records, variants,
+  pipelines, prefix `with`, effect declarations, effect rows, handler clauses,
+  and match arms;
+- golden fixture tests covering Phase 1 through Phase 3 syntax;
+- idempotence tests that formatting already-formatted source makes no changes.
+
+Defer:
+
+- semantic refactors or code actions;
+- import sorting if it could change module resolution behavior;
+- formatting for scoped effects, coeffects, and `given` until those phases land;
+- preserving arbitrary unusual spacing exactly as written.
+
+Formatter success criteria:
+
+- `fx fmt --check examples` succeeds for accepted examples;
+- formatting preserves comments and parses back to the same accepted program
+  shape;
+- malformed files report diagnostics without overwriting source;
+- formatter tests include compact, intentionally messy inputs and expected
+  canonical output.
+
 ## Phase 4: Named scopes
 
 Goal: scoped effect families and scope-polymorphic effect rows.
