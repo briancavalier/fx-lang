@@ -235,6 +235,53 @@ fn phase_3_resume_fixture_executes_observable_main() {
 }
 
 #[test]
+fn phase_3_resume_fixture_runs_directly_under_node() {
+    let output = compile_and_run_module_directly(
+        "phase_3_resume_direct",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/resume.fx",
+            include_str!("../../../examples/phase-3/resume.fx"),
+        )],
+        "resume",
+    );
+
+    assert_eq!(output, "11");
+}
+
+#[test]
+fn phase_3_raise_fixture_runs_directly_under_node() {
+    let output = compile_and_run_module_directly(
+        "phase_3_raise_direct",
+        "examples/phase-3",
+        vec![source(
+            "examples/phase-3/effects.fx",
+            include_str!("../../../examples/phase-3/effects.fx"),
+        )],
+        "effects",
+    );
+
+    assert_eq!(output, "0");
+}
+
+#[test]
+fn direct_unit_main_does_not_print_undefined() {
+    let output = compile_and_run_module_directly(
+        "direct_unit_main",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"export main() : Unit
+  unit
+"#,
+        )],
+        "main",
+    );
+
+    assert_eq!(output, "");
+}
+
+#[test]
 fn effectful_expression_statements_execute_in_order() {
     let output = compile_and_run_main(
         "effectful_expression_statements",
@@ -294,6 +341,38 @@ fn compile_and_run_main(
         ))
         .output()
         .expect("node executes generated JavaScript");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "node failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout)
+        .expect("node stdout is utf8")
+        .trim()
+        .to_string()
+}
+
+fn compile_and_run_module_directly(
+    prefix: &str,
+    root: &str,
+    files: Vec<SourceFile>,
+    module: &str,
+) -> String {
+    let analysis = analyze_workspace(&PathBuf::from(root), files);
+    let session = prepare_compile(analysis, CompileOptions::default()).expect("compile session");
+    let program = lower_to_core(&session).expect("core program");
+    let dir = temp_dir(prefix);
+    write_modules(&dir, emit_javascript_modules(&program));
+
+    let output = Command::new("node")
+        .arg(dir.join(format!("{module}.mjs")))
+        .output()
+        .expect("node executes generated JavaScript directly");
 
     let _ = fs::remove_dir_all(&dir);
 

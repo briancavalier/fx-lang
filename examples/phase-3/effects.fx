@@ -28,3 +28,6 @@ with-fallback(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
 export value() : Int
   with catch(0)
     safe-divide(10, 0)
+
+export main() : Int
+  value()

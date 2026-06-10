@@ -387,6 +387,9 @@ Compiler success criteria:
   emission with compiler diagnostics distinct from parser and checker
   diagnostics;
 - supported Phase 3 effect examples compile to JavaScript and run under Node;
+- supported generated JavaScript modules with exported zero-argument `main`
+  run directly with `node path/to/module.mjs`, print non-`Unit` results, and
+  remain inert when imported;
 - generated JavaScript correctly handles operation requests, handler dispatch,
   ordinary returns, and explicit `resume` for the supported subset.
 

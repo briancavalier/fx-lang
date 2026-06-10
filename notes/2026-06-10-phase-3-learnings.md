@@ -56,8 +56,8 @@ evidence that produced them.
   effect row separately from record and variant rows.
 - Applies to phase(s): Phase 3.
 - Future implication: The checker lowers this syntax to effectful result
-  types, and `fx compile --target js` should continue rejecting effectful
-  programs until Phase 3.1.
+  types. During Phase 3, `fx compile --target js` rejected effectful programs
+  until Phase 3.1 added runtime support.
 - Revisit when: Internal effect-row representation and unhandled-effect
   diagnostics are implemented.
 
@@ -96,9 +96,9 @@ evidence that produced them.
   --no-run`, `cargo check`, `cargo test -p fx-syntax`, `cargo test -p
   fx-core`, `cargo test -p fx-compiler`, `cargo test -p fx-cli`, `cargo test
   -p fx-lsp`, `cargo run -q -p fx-cli -- check examples`, and `cargo run -q
-  -p fx-cli -- compile --target js examples/phase-2.6`. `cargo run -q -p
-  fx-cli -- compile --target js examples/phase-3` rejects with
-  `unsupported-effect-runtime`, as required until Phase 3.1.
+  -p fx-cli -- compile --target js examples/phase-2.6`. At Phase 3 completion,
+  `cargo run -q -p fx-cli -- compile --target js examples/phase-3` rejected
+  with `unsupported-effect-runtime`, as required before Phase 3.1.
 - Applies to phase(s): Phase 3 and Phase 3.1.
 - Future implication: Phase 3.1 can start from checked handler/effect programs
   and focus on executable JavaScript lowering/runtime support.

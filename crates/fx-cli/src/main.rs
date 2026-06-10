@@ -640,11 +640,7 @@ mod tests {
         assert!(out_dir.join("main.mjs").exists());
 
         let node = std::process::Command::new("node")
-            .arg("-e")
-            .arg(format!(
-                "import('{}/main.mjs').then((m) => console.log(m.__fx_user_main()))",
-                out_dir.display()
-            ))
+            .arg(out_dir.join("main.mjs"))
             .output()
             .expect("node runs compiled output");
 
