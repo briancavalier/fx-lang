@@ -7,7 +7,6 @@ choose-first(action: () -> a with <Choose, ...e>) : a with <...e>
   handle action()
     choose(left, _right, resume) ->
       resume(left)
-
     return(value) ->
       value
 
@@ -15,7 +14,6 @@ choose-second(action: () -> a with <Choose, ...e>) : a with <...e>
   handle action()
     choose(_left, right, resume) ->
       resume(right)
-
     return(value) ->
       value
 

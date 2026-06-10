@@ -3,6 +3,8 @@ use fx_compiler::{
     CompileOptions, CompileTarget, emit_javascript_modules, lower_to_core, prepare_compile,
 };
 use fx_core::{Analysis, AnalysisDiagnostic, SourceFile, analyze_workspace, index_workspace};
+use fx_syntax::diagnostic::Diagnostic;
+use fx_syntax::formatter::format_module;
 use fx_syntax::parse_file;
 use fx_syntax::span::Span;
 use std::collections::BTreeMap;
@@ -42,6 +44,13 @@ fn main() -> Result<ExitCode> {
         "compile" => {
             let options = CompileCliOptions::parse(args.collect())?;
             let output = compile_output(&options)?;
+            print!("{stdout}", stdout = output.stdout);
+            eprint!("{stderr}", stderr = output.stderr);
+            output.exit_code
+        }
+        "fmt" => {
+            let options = FmtOptions::parse(args.collect())?;
+            let output = fmt_output(&options)?;
             print!("{stdout}", stdout = output.stdout);
             eprint!("{stderr}", stderr = output.stderr);
             output.exit_code
@@ -105,6 +114,7 @@ fn usage() {
     eprintln!("  fx symbols [root]");
     eprintln!("  fx check [--json] [root-or-file]");
     eprintln!("  fx compile --target js [--out-dir dir] [root-or-file]");
+    eprintln!("  fx fmt [--check] [root-or-file]");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +128,12 @@ struct CompileCliOptions {
     path: PathBuf,
     target: CompileTarget,
     out_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FmtOptions {
+    path: PathBuf,
+    check: bool,
 }
 
 impl CompileCliOptions {
@@ -181,6 +197,26 @@ impl CheckOptions {
         Ok(Self {
             path: path.unwrap_or_else(|| PathBuf::from(".")),
             json,
+        })
+    }
+}
+
+impl FmtOptions {
+    fn parse(args: Vec<String>) -> Result<Self> {
+        let mut check = false;
+        let mut path = None;
+
+        for arg in args {
+            match arg.as_str() {
+                "--check" => check = true,
+                _ if path.is_none() => path = Some(PathBuf::from(arg)),
+                _ => bail!("unexpected argument `{arg}`"),
+            }
+        }
+
+        Ok(Self {
+            path: path.unwrap_or_else(|| PathBuf::from(".")),
+            check,
         })
     }
 }
@@ -256,6 +292,87 @@ fn compile_output(options: &CompileCliOptions) -> Result<CommandOutput> {
         stderr: String::new(),
         exit_code: ExitCode::SUCCESS,
     })
+}
+
+fn fmt_output(options: &FmtOptions) -> Result<CommandOutput> {
+    let paths = collect_fmt_paths(&options.path)?;
+    let mut changed_paths = Vec::new();
+    let mut unchanged = 0usize;
+    let mut stderr = String::new();
+    let mut had_diagnostics = false;
+
+    for path in &paths {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        match format_module(&source) {
+            Ok(formatted) if formatted.changed => {
+                changed_paths.push(path.clone());
+                if !options.check {
+                    fs::write(path, formatted.source)
+                        .with_context(|| format!("failed to write `{}`", path.display()))?;
+                }
+            }
+            Ok(_) => unchanged += 1,
+            Err(diagnostics) => {
+                had_diagnostics = true;
+                stderr.push_str(&render_syntax_diagnostics(path, &source, &diagnostics));
+            }
+        }
+    }
+
+    if had_diagnostics {
+        return Ok(CommandOutput {
+            stdout: String::new(),
+            stderr,
+            exit_code: ExitCode::FAILURE,
+        });
+    }
+
+    if options.check {
+        if changed_paths.is_empty() {
+            return Ok(CommandOutput {
+                stdout: format!("fx fmt: all {} file(s) formatted\n", paths.len()),
+                stderr: String::new(),
+                exit_code: ExitCode::SUCCESS,
+            });
+        }
+
+        let mut stdout = String::from("fx fmt: files need formatting\n");
+        for path in changed_paths {
+            stdout.push_str(&format!("{}\n", path.display()));
+        }
+        return Ok(CommandOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: ExitCode::FAILURE,
+        });
+    }
+
+    Ok(CommandOutput {
+        stdout: format!(
+            "fx fmt: formatted {} file(s), {} unchanged\n",
+            changed_paths.len(),
+            unchanged
+        ),
+        stderr: String::new(),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn collect_fmt_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "fx") {
+            paths.push(entry.path().to_path_buf());
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn render_check_output(analysis: &Analysis, json: bool) -> Result<CommandOutput> {
@@ -342,6 +459,32 @@ fn render_diagnostic(source: &str, diagnostic: &AnalysisDiagnostic) -> String {
     format!(
         "{}:{}:{}: error: {}\n{}\n{}",
         diagnostic.path.display(),
+        location.line + 1,
+        location.column + 1,
+        diagnostic.message,
+        line,
+        underline
+    )
+}
+
+fn render_syntax_diagnostics(path: &Path, source: &str, diagnostics: &[Diagnostic]) -> String {
+    let mut output = String::new();
+    for diagnostic in diagnostics {
+        output.push_str(&render_syntax_diagnostic(path, source, diagnostic));
+        output.push('\n');
+    }
+    output
+}
+
+fn render_syntax_diagnostic(path: &Path, source: &str, diagnostic: &Diagnostic) -> String {
+    let index = LineIndex::new(source);
+    let location = index.location(diagnostic.span.start);
+    let line = index.line(location.line);
+    let underline = index.underline(diagnostic.span);
+
+    format!(
+        "{}:{}:{}: error: {}\n{}\n{}",
+        path.display(),
         location.line + 1,
         location.column + 1,
         diagnostic.message,
@@ -531,6 +674,15 @@ mod tests {
     }
 
     #[test]
+    fn fmt_options_accept_check_before_path() {
+        let options =
+            FmtOptions::parse(vec!["--check".to_string(), "src".to_string()]).expect("options");
+
+        assert!(options.check);
+        assert_eq!(options.path, PathBuf::from("src"));
+    }
+
+    #[test]
     fn compile_options_require_target() {
         let error = CompileCliOptions::parse(vec!["src".to_string()]).expect_err("target error");
 
@@ -621,6 +773,113 @@ mod tests {
         assert!(output.stderr.is_empty());
         assert!(output.stdout.contains("__fx.perform"));
         assert!(output.stdout.contains("__fx.handle"));
+    }
+
+    #[test]
+    fn fmt_formats_single_file_in_place() {
+        let dir = temp_dir("fx-cli-fmt-file");
+        let file = dir.join("main.fx");
+        fs::write(&file, "value() : Int   \n  1\t\n\n").expect("write source");
+
+        let output = fmt_output(&FmtOptions {
+            path: file.clone(),
+            check: false,
+        })
+        .expect("fmt output");
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert_eq!(output.stdout, "fx fmt: formatted 1 file(s), 0 unchanged\n");
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            fs::read_to_string(&file).expect("read formatted"),
+            "value() : Int\n  1\n"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fmt_check_reports_files_that_would_change_without_writing() {
+        let dir = temp_dir("fx-cli-fmt-check");
+        let file = dir.join("main.fx");
+        let source = "value() : Int   \n  1\n";
+        fs::write(&file, source).expect("write source");
+
+        let output = fmt_output(&FmtOptions {
+            path: dir.clone(),
+            check: true,
+        })
+        .expect("fmt output");
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.contains("files need formatting"));
+        assert!(output.stdout.contains("main.fx"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(fs::read_to_string(&file).expect("read source"), source);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fmt_check_reports_safely_sortable_imports_without_writing() {
+        let dir = temp_dir("fx-cli-fmt-check-imports");
+        let file = dir.join("main.fx");
+        let source = "import zebra\nimport alpha\n\nvalue() : Int\n  1\n";
+        fs::write(&file, source).expect("write source");
+
+        let output = fmt_output(&FmtOptions {
+            path: dir.clone(),
+            check: true,
+        })
+        .expect("fmt output");
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.contains("files need formatting"));
+        assert!(output.stdout.contains("main.fx"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(fs::read_to_string(&file).expect("read source"), source);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fmt_check_succeeds_for_formatted_directory() {
+        let dir = temp_dir("fx-cli-fmt-check-ok");
+        fs::write(dir.join("a.fx"), "a() : Int\n  1\n").expect("write a");
+        fs::write(dir.join("b.fx"), "b() : Int\n  2\n").expect("write b");
+
+        let output = fmt_output(&FmtOptions {
+            path: dir.clone(),
+            check: true,
+        })
+        .expect("fmt output");
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert_eq!(output.stdout, "fx fmt: all 2 file(s) formatted\n");
+        assert!(output.stderr.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fmt_reports_diagnostics_and_does_not_overwrite_malformed_files() {
+        let dir = temp_dir("fx-cli-fmt-bad");
+        let file = dir.join("bad.fx");
+        let source = "bad() : Int\n  \"nope\n";
+        fs::write(&file, source).expect("write source");
+
+        let output = fmt_output(&FmtOptions {
+            path: file.clone(),
+            check: false,
+        })
+        .expect("fmt output");
+
+        assert_eq!(output.exit_code, ExitCode::FAILURE);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("unterminated string literal"));
+        assert_eq!(fs::read_to_string(&file).expect("read source"), source);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

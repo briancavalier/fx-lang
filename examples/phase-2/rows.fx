@@ -9,11 +9,8 @@ greet(person: { name: Text, ...r }) : Text
 message(result: < Ok(a), Missing(), Error(Text), ...r >) : Text
   match result
     Ok(_) -> "ok"
-
     Missing() -> "missing"
-
     Error(text) -> text
-
     other -> "unknown"
 
 # Boundary goals for future row diagnostics:

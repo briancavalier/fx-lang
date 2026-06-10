@@ -8,6 +8,51 @@ pub(crate) struct Token {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LexedSource {
+    pub tokens: Vec<SyntaxToken>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyntaxToken {
+    pub kind: SyntaxTokenKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyntaxTokenKind {
+    Ident(String),
+    Int(i64),
+    Text(String),
+    Keyword(Keyword),
+    Whitespace,
+    Comment,
+    Newline,
+    Indent,
+    Dedent,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    LAngle,
+    RAngle,
+    Colon,
+    Comma,
+    Dot,
+    PipeGreater,
+    Equal,
+    Arrow,
+    PlusPlus,
+    EqEq,
+    Plus,
+    Minus,
+    Spread,
+    Eof,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TokenKind {
     Ident(String),
     Int(i64),
@@ -39,7 +84,7 @@ pub(crate) enum TokenKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Keyword {
+pub enum Keyword {
     Export,
     Import,
     Type,
@@ -57,6 +102,16 @@ pub(crate) enum Keyword {
 }
 
 pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+    let lexed = lex_source(source);
+    let tokens = lexed
+        .tokens
+        .iter()
+        .filter_map(parser_token)
+        .collect::<Vec<_>>();
+    (tokens, lexed.diagnostics)
+}
+
+pub fn lex_source(source: &str) -> LexedSource {
     let bytes = source.as_bytes();
     let mut tokens = Vec::new();
     let mut diagnostics = Vec::new();
@@ -72,9 +127,15 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                 spaces += 1;
                 i += 1;
             }
+            if spaces > 0 {
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Whitespace,
+                    span: Span::new(line_offset, i),
+                });
+            }
             if i < bytes.len() && bytes[i] == b'\n' {
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Newline,
                     span: Span::new(i, i + 1),
                 });
                 i += 1;
@@ -83,15 +144,15 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
             let current = *indent_stack.last().expect("indent stack is never empty");
             if spaces > current {
                 indent_stack.push(spaces);
-                tokens.push(Token {
-                    kind: TokenKind::Indent,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Indent,
                     span: Span::new(line_offset, i),
                 });
             } else {
                 while spaces < *indent_stack.last().expect("indent stack is never empty") {
                     indent_stack.pop();
-                    tokens.push(Token {
-                        kind: TokenKind::Dedent,
+                    tokens.push(SyntaxToken {
+                        kind: SyntaxTokenKind::Dedent,
                         span: Span::point(i),
                     });
                 }
@@ -107,10 +168,18 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
 
         let start = i;
         match bytes[i] {
-            b' ' | b'\t' | b'\r' => i += 1,
+            b' ' | b'\t' | b'\r' => {
+                while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\r') {
+                    i += 1;
+                }
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Whitespace,
+                    span: Span::new(start, i),
+                });
+            }
             b'\n' => {
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Newline,
                     span: Span::new(i, i + 1),
                 });
                 i += 1;
@@ -120,56 +189,60 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Comment,
+                    span: Span::new(start, i),
+                });
             }
-            b'(' => single(&mut tokens, TokenKind::LParen, start, &mut i),
-            b')' => single(&mut tokens, TokenKind::RParen, start, &mut i),
-            b'{' => single(&mut tokens, TokenKind::LBrace, start, &mut i),
-            b'}' => single(&mut tokens, TokenKind::RBrace, start, &mut i),
-            b'[' => single(&mut tokens, TokenKind::LBracket, start, &mut i),
-            b']' => single(&mut tokens, TokenKind::RBracket, start, &mut i),
-            b'<' => single(&mut tokens, TokenKind::LAngle, start, &mut i),
-            b'>' => single(&mut tokens, TokenKind::RAngle, start, &mut i),
-            b':' => single(&mut tokens, TokenKind::Colon, start, &mut i),
-            b',' => single(&mut tokens, TokenKind::Comma, start, &mut i),
+            b'(' => single(&mut tokens, SyntaxTokenKind::LParen, start, &mut i),
+            b')' => single(&mut tokens, SyntaxTokenKind::RParen, start, &mut i),
+            b'{' => single(&mut tokens, SyntaxTokenKind::LBrace, start, &mut i),
+            b'}' => single(&mut tokens, SyntaxTokenKind::RBrace, start, &mut i),
+            b'[' => single(&mut tokens, SyntaxTokenKind::LBracket, start, &mut i),
+            b']' => single(&mut tokens, SyntaxTokenKind::RBracket, start, &mut i),
+            b'<' => single(&mut tokens, SyntaxTokenKind::LAngle, start, &mut i),
+            b'>' => single(&mut tokens, SyntaxTokenKind::RAngle, start, &mut i),
+            b':' => single(&mut tokens, SyntaxTokenKind::Colon, start, &mut i),
+            b',' => single(&mut tokens, SyntaxTokenKind::Comma, start, &mut i),
             b'|' if bytes.get(i + 1) == Some(&b'>') => {
                 i += 2;
-                tokens.push(Token {
-                    kind: TokenKind::PipeGreater,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::PipeGreater,
                     span: Span::new(start, i),
                 });
             }
             b'=' if bytes.get(i + 1) == Some(&b'=') => {
                 i += 2;
-                tokens.push(Token {
-                    kind: TokenKind::EqEq,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::EqEq,
                     span: Span::new(start, i),
                 });
             }
-            b'=' => single(&mut tokens, TokenKind::Equal, start, &mut i),
+            b'=' => single(&mut tokens, SyntaxTokenKind::Equal, start, &mut i),
             b'+' if bytes.get(i + 1) == Some(&b'+') => {
                 i += 2;
-                tokens.push(Token {
-                    kind: TokenKind::PlusPlus,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::PlusPlus,
                     span: Span::new(start, i),
                 });
             }
-            b'+' => single(&mut tokens, TokenKind::Plus, start, &mut i),
+            b'+' => single(&mut tokens, SyntaxTokenKind::Plus, start, &mut i),
             b'-' if bytes.get(i + 1) == Some(&b'>') => {
                 i += 2;
-                tokens.push(Token {
-                    kind: TokenKind::Arrow,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Arrow,
                     span: Span::new(start, i),
                 });
             }
-            b'-' => single(&mut tokens, TokenKind::Minus, start, &mut i),
+            b'-' => single(&mut tokens, SyntaxTokenKind::Minus, start, &mut i),
             b'.' if bytes.get(i + 1) == Some(&b'.') && bytes.get(i + 2) == Some(&b'.') => {
                 i += 3;
-                tokens.push(Token {
-                    kind: TokenKind::Spread,
+                tokens.push(SyntaxToken {
+                    kind: SyntaxTokenKind::Spread,
                     span: Span::new(start, i),
                 });
             }
-            b'.' => single(&mut tokens, TokenKind::Dot, start, &mut i),
+            b'.' => single(&mut tokens, SyntaxTokenKind::Dot, start, &mut i),
             b'"' => lex_string(source, &mut tokens, &mut diagnostics, start, &mut i),
             c if is_ident_start(c) => lex_ident(source, &mut tokens, start, &mut i),
             c if c.is_ascii_digit() => {
@@ -187,21 +260,24 @@ pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
 
     while indent_stack.len() > 1 {
         indent_stack.pop();
-        tokens.push(Token {
-            kind: TokenKind::Dedent,
+        tokens.push(SyntaxToken {
+            kind: SyntaxTokenKind::Dedent,
             span: Span::point(source.len()),
         });
     }
-    tokens.push(Token {
-        kind: TokenKind::Eof,
+    tokens.push(SyntaxToken {
+        kind: SyntaxTokenKind::Eof,
         span: Span::point(source.len()),
     });
-    (tokens, diagnostics)
+    LexedSource {
+        tokens,
+        diagnostics,
+    }
 }
 
-fn single(tokens: &mut Vec<Token>, kind: TokenKind, start: usize, i: &mut usize) {
+fn single(tokens: &mut Vec<SyntaxToken>, kind: SyntaxTokenKind, start: usize, i: &mut usize) {
     *i += 1;
-    tokens.push(Token {
+    tokens.push(SyntaxToken {
         kind,
         span: Span::new(start, *i),
     });
@@ -209,7 +285,7 @@ fn single(tokens: &mut Vec<Token>, kind: TokenKind, start: usize, i: &mut usize)
 
 fn lex_string(
     source: &str,
-    tokens: &mut Vec<Token>,
+    tokens: &mut Vec<SyntaxToken>,
     diagnostics: &mut Vec<Diagnostic>,
     start: usize,
     i: &mut usize,
@@ -220,8 +296,8 @@ fn lex_string(
         let b = source.as_bytes()[*i];
         if b == b'"' {
             *i += 1;
-            tokens.push(Token {
-                kind: TokenKind::Text(value),
+            tokens.push(SyntaxToken {
+                kind: SyntaxTokenKind::Text(value),
                 span: Span::new(start, *i),
             });
             return;
@@ -240,7 +316,7 @@ fn lex_string(
 
 fn lex_int(
     source: &str,
-    tokens: &mut Vec<Token>,
+    tokens: &mut Vec<SyntaxToken>,
     diagnostics: &mut Vec<Diagnostic>,
     start: usize,
     i: &mut usize,
@@ -249,8 +325,8 @@ fn lex_int(
         *i += 1;
     }
     match source[start..*i].parse::<i64>() {
-        Ok(value) => tokens.push(Token {
-            kind: TokenKind::Int(value),
+        Ok(value) => tokens.push(SyntaxToken {
+            kind: SyntaxTokenKind::Int(value),
             span: Span::new(start, *i),
         }),
         Err(_) => diagnostics.push(Diagnostic::new(
@@ -260,7 +336,7 @@ fn lex_int(
     }
 }
 
-fn lex_ident(source: &str, tokens: &mut Vec<Token>, start: usize, i: &mut usize) {
+fn lex_ident(source: &str, tokens: &mut Vec<SyntaxToken>, start: usize, i: &mut usize) {
     while *i < source.len() {
         let b = source.as_bytes()[*i];
         if is_ident_continue(b) || (b == b'-' && can_continue_after_hyphen(source, *i)) {
@@ -271,26 +347,63 @@ fn lex_ident(source: &str, tokens: &mut Vec<Token>, start: usize, i: &mut usize)
     }
     let text = &source[start..*i];
     let kind = match text {
-        "export" => TokenKind::Keyword(Keyword::Export),
-        "import" => TokenKind::Keyword(Keyword::Import),
-        "type" => TokenKind::Keyword(Keyword::Type),
-        "if" => TokenKind::Keyword(Keyword::If),
-        "then" => TokenKind::Keyword(Keyword::Then),
-        "else" => TokenKind::Keyword(Keyword::Else),
-        "match" => TokenKind::Keyword(Keyword::Match),
-        "true" => TokenKind::Keyword(Keyword::True),
-        "false" => TokenKind::Keyword(Keyword::False),
-        "effect" => TokenKind::Keyword(Keyword::Effect),
-        "handle" => TokenKind::Keyword(Keyword::Handle),
-        "given" => TokenKind::Keyword(Keyword::Given),
-        "scope" => TokenKind::Keyword(Keyword::Scope),
-        "with" => TokenKind::Keyword(Keyword::With),
-        _ => TokenKind::Ident(text.to_string()),
+        "export" => SyntaxTokenKind::Keyword(Keyword::Export),
+        "import" => SyntaxTokenKind::Keyword(Keyword::Import),
+        "type" => SyntaxTokenKind::Keyword(Keyword::Type),
+        "if" => SyntaxTokenKind::Keyword(Keyword::If),
+        "then" => SyntaxTokenKind::Keyword(Keyword::Then),
+        "else" => SyntaxTokenKind::Keyword(Keyword::Else),
+        "match" => SyntaxTokenKind::Keyword(Keyword::Match),
+        "true" => SyntaxTokenKind::Keyword(Keyword::True),
+        "false" => SyntaxTokenKind::Keyword(Keyword::False),
+        "effect" => SyntaxTokenKind::Keyword(Keyword::Effect),
+        "handle" => SyntaxTokenKind::Keyword(Keyword::Handle),
+        "given" => SyntaxTokenKind::Keyword(Keyword::Given),
+        "scope" => SyntaxTokenKind::Keyword(Keyword::Scope),
+        "with" => SyntaxTokenKind::Keyword(Keyword::With),
+        _ => SyntaxTokenKind::Ident(text.to_string()),
     };
-    tokens.push(Token {
+    tokens.push(SyntaxToken {
         kind,
         span: Span::new(start, *i),
     });
+}
+
+fn parser_token(token: &SyntaxToken) -> Option<Token> {
+    let kind = match &token.kind {
+        SyntaxTokenKind::Ident(text) => TokenKind::Ident(text.clone()),
+        SyntaxTokenKind::Int(value) => TokenKind::Int(*value),
+        SyntaxTokenKind::Text(value) => TokenKind::Text(value.clone()),
+        SyntaxTokenKind::Keyword(keyword) => TokenKind::Keyword(*keyword),
+        SyntaxTokenKind::Whitespace | SyntaxTokenKind::Comment => return None,
+        SyntaxTokenKind::Newline => TokenKind::Newline,
+        SyntaxTokenKind::Indent => TokenKind::Indent,
+        SyntaxTokenKind::Dedent => TokenKind::Dedent,
+        SyntaxTokenKind::LParen => TokenKind::LParen,
+        SyntaxTokenKind::RParen => TokenKind::RParen,
+        SyntaxTokenKind::LBrace => TokenKind::LBrace,
+        SyntaxTokenKind::RBrace => TokenKind::RBrace,
+        SyntaxTokenKind::LBracket => TokenKind::LBracket,
+        SyntaxTokenKind::RBracket => TokenKind::RBracket,
+        SyntaxTokenKind::LAngle => TokenKind::LAngle,
+        SyntaxTokenKind::RAngle => TokenKind::RAngle,
+        SyntaxTokenKind::Colon => TokenKind::Colon,
+        SyntaxTokenKind::Comma => TokenKind::Comma,
+        SyntaxTokenKind::Dot => TokenKind::Dot,
+        SyntaxTokenKind::PipeGreater => TokenKind::PipeGreater,
+        SyntaxTokenKind::Equal => TokenKind::Equal,
+        SyntaxTokenKind::Arrow => TokenKind::Arrow,
+        SyntaxTokenKind::PlusPlus => TokenKind::PlusPlus,
+        SyntaxTokenKind::EqEq => TokenKind::EqEq,
+        SyntaxTokenKind::Plus => TokenKind::Plus,
+        SyntaxTokenKind::Minus => TokenKind::Minus,
+        SyntaxTokenKind::Spread => TokenKind::Spread,
+        SyntaxTokenKind::Eof => TokenKind::Eof,
+    };
+    Some(Token {
+        kind,
+        span: token.span,
+    })
 }
 
 fn can_continue_after_hyphen(source: &str, i: usize) -> bool {

@@ -17,7 +17,6 @@ catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
   handle action()
     raise(_message, _resume) ->
       default
-
     return(value) ->
       value
 

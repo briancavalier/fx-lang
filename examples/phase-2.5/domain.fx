@@ -4,10 +4,7 @@
 # exercising records, record update, variants, matches, lists, recursion, and
 # open-row consumers for future compiler lowering and JavaScript emission.
 
-export type Person = {
-  name: Text,
-  done: Bool
-}
+export type Person = { name: Text, done: Bool }
 
 export type Lookup a = < Found(a), Missing(), Error(Text) >
 
@@ -19,22 +16,12 @@ export mark-done(person: Person) : Person
 
 export find-person(wanted: Text, people: List Person) : Lookup Person
   match people
-    [] ->
-      Missing()
-
-    [person, ...rest] ->
-      if person.name == wanted then Found(person) else find-person(wanted, rest)
+    [] -> Missing()
+    [person, ...rest] -> if person.name == wanted then Found(person) else find-person(wanted, rest)
 
 export render(lookup: < Found(Person), Missing(), Error(Text), ...r >) : Text
   match lookup
-    Found(person) ->
-      greet(person)
-
-    Missing() ->
-      "missing"
-
-    Error(text) ->
-      text
-
-    other ->
-      "unknown"
+    Found(person) -> greet(person)
+    Missing() -> "missing"
+    Error(text) -> text
+    other -> "unknown"

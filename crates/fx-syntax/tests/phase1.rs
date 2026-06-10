@@ -1,5 +1,5 @@
 use fx_syntax::ast::{Expr, Item, Pattern, Stmt, TypeExpr};
-use fx_syntax::parse_file;
+use fx_syntax::{SyntaxTokenKind, lex_source, parse_file};
 
 #[test]
 fn parses_phase_1_todo_goal_fixture() {
@@ -11,6 +11,40 @@ fn parses_phase_1_todo_goal_fixture() {
     assert!(matches!(parsed.module.items[1], Item::Type(_)));
     assert!(matches!(parsed.module.items[2], Item::Value(_)));
     assert!(matches!(parsed.module.items[3], Item::Value(_)));
+}
+
+#[test]
+fn lexical_stream_exposes_comments_and_trivia_for_tooling() {
+    let source = "# file comment\nvalue() : Int  # trailing\n  1\n";
+    let lexed = lex_source(source);
+
+    assert_eq!(lexed.diagnostics, []);
+    let comments = lexed
+        .tokens
+        .iter()
+        .filter(|token| matches!(token.kind, SyntaxTokenKind::Comment))
+        .collect::<Vec<_>>();
+    assert_eq!(comments.len(), 2);
+    assert_eq!(
+        &source[comments[0].span.start..comments[0].span.end],
+        "# file comment"
+    );
+    assert_eq!(
+        &source[comments[1].span.start..comments[1].span.end],
+        "# trailing"
+    );
+    assert!(
+        lexed
+            .tokens
+            .iter()
+            .any(|token| matches!(token.kind, SyntaxTokenKind::Whitespace))
+    );
+    assert!(
+        lexed
+            .tokens
+            .iter()
+            .any(|token| matches!(token.kind, SyntaxTokenKind::Indent))
+    );
 }
 
 #[test]
