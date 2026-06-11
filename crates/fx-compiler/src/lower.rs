@@ -97,7 +97,19 @@ impl ModuleLowerer<'_, '_> {
             .filter_map(|item| match item {
                 Item::Import(_) => None,
                 Item::Type(decl) => self.lower_type_decl(decl).map(CoreDecl::Type),
-                Item::Effect(_) => None,
+                Item::Effect(decl) => {
+                    if decl.scoped {
+                        self.unsupported(
+                            decl.span,
+                            "scoped effect declarations are not executable yet",
+                        );
+                    }
+                    None
+                }
+                Item::Scope(decl) => {
+                    self.unsupported(decl.span, "scope declarations are not executable yet");
+                    None
+                }
                 Item::Value(decl) => Some(CoreDecl::Value(self.lower_value_decl(decl))),
             })
             .collect();
@@ -354,6 +366,10 @@ impl ModuleLowerer<'_, '_> {
                     );
                 }
                 return current;
+            }
+            Expr::Within { span, .. } => {
+                self.unsupported(*span, "unsupported scoped-effect runtime");
+                CoreExprKind::Unit
             }
             Expr::Handle {
                 action,
@@ -1196,6 +1212,42 @@ bad() : List Int with <Raise>
             diagnostic
                 .message
                 .contains("unsupported-effect-runtime: effectful list items")
+        }));
+    }
+
+    #[test]
+    fn rejects_accepted_but_unsupported_scoped_effect_runtime() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples/phase-4"),
+            vec![source(
+                "examples/phase-4/state.fx",
+                r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+increment() : Int with <State Counter Int>
+  within Counter
+    n = get()
+    put(n + 1)
+    n
+"#,
+            )],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+
+        let diagnostics = lower_to_core(&session).expect_err("compiler diagnostics");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("Phase 2.5 compiler unsupported: scoped effect declarations")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("Phase 2.5 compiler unsupported: scope declarations")
         }));
     }
 

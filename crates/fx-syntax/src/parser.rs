@@ -56,8 +56,12 @@ impl Parser {
             Some(Item::Import(self.import_decl()))
         } else if self.at_keyword(Keyword::Type) {
             Some(Item::Type(self.type_decl(export)))
+        } else if self.at_keyword(Keyword::Scoped) {
+            Some(Item::Effect(self.scoped_effect_decl(export)))
         } else if self.at_keyword(Keyword::Effect) {
             Some(Item::Effect(self.effect_decl(export)))
+        } else if self.at_keyword(Keyword::Scope) {
+            Some(Item::Scope(self.scope_decl(export)))
         } else if self.is_later_phase_keyword() {
             let span = self.bump().span;
             self.diagnostics.push(Diagnostic::new(
@@ -132,6 +136,18 @@ impl Parser {
         let start = self
             .expect_keyword(Keyword::Effect, "expected `effect`")
             .start;
+        self.finish_effect_decl(export, false, start)
+    }
+
+    fn scoped_effect_decl(&mut self, export: bool) -> EffectDecl {
+        let start = self
+            .expect_keyword(Keyword::Scoped, "expected `scoped`")
+            .start;
+        self.expect_keyword(Keyword::Effect, "expected `effect` after `scoped`");
+        self.finish_effect_decl(export, true, start)
+    }
+
+    fn finish_effect_decl(&mut self, export: bool, scoped: bool, start: usize) -> EffectDecl {
         let name = self
             .expect_ident("expected effect name")
             .unwrap_or_else(|| error_name(start));
@@ -140,6 +156,12 @@ impl Parser {
             if let Some(param) = self.expect_ident("expected effect type parameter") {
                 params.push(param);
             }
+        }
+        if scoped && params.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                name.span,
+                "scoped effect declarations require a scope parameter",
+            ));
         }
         self.expect_newline("expected newline before effect operations");
         self.expect(TokenKind::Indent, "expected indented effect operations");
@@ -154,9 +176,39 @@ impl Parser {
             .end;
         EffectDecl {
             export,
+            scoped,
             name,
             params,
             operations,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn scope_decl(&mut self, export: bool) -> ScopeDecl {
+        let start = self
+            .expect_keyword(Keyword::Scope, "expected `scope`")
+            .start;
+        let name = self
+            .expect_ident("expected scope name")
+            .unwrap_or_else(|| error_name(start));
+        let mut protocol = None;
+        let mut end = name.span.end;
+        if self.eat_keyword(Keyword::With).is_some() {
+            let row = self.effect_row();
+            end = row.span.end;
+            protocol = Some(row);
+        } else if self.eat(TokenKind::Colon).is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                name.span,
+                "scope protocol rows use `with <...>`; try `scope Name with <Protocol>`",
+            ));
+            let recovered = self.type_expr();
+            end = recovered.span().end;
+        }
+        ScopeDecl {
+            export,
+            name,
+            protocol,
             span: Span::new(start, end),
         }
     }
@@ -285,6 +337,8 @@ impl Parser {
             self.lambda_expr()
         } else if self.at_keyword(Keyword::With) {
             self.with_expr()
+        } else if self.at_keyword(Keyword::Within) {
+            self.within_expr()
         } else {
             let expr = self.binary_expr(0);
             if self.at_keyword(Keyword::With) {
@@ -373,6 +427,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::If) => self.if_expr(),
             TokenKind::Keyword(Keyword::Match) => self.match_expr(),
             TokenKind::Keyword(Keyword::Handle) => self.handle_expr(),
+            TokenKind::Keyword(Keyword::Within) => self.within_expr(),
             TokenKind::Keyword(Keyword::True) => {
                 let span = self.bump().span;
                 Expr::Bool { value: true, span }
@@ -435,6 +490,19 @@ impl Parser {
             body,
             span,
         }
+    }
+
+    fn within_expr(&mut self) -> Expr {
+        let start = self
+            .expect_keyword(Keyword::Within, "expected `within`")
+            .start;
+        let scope = self.expect_qualified_name("expected scope after `within`");
+        self.expect_newline("expected newline after `within` scope");
+        self.expect(TokenKind::Indent, "expected indented `within` body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of `within` body");
+        let span = Span::new(start, body.span.end);
+        Expr::Within { scope, body, span }
     }
 
     fn handle_expr(&mut self) -> Expr {
@@ -1341,10 +1409,7 @@ impl Parser {
     }
 
     fn is_later_phase_keyword(&self) -> bool {
-        matches!(
-            self.peek().kind,
-            TokenKind::Keyword(Keyword::Given) | TokenKind::Keyword(Keyword::Scope)
-        )
+        matches!(self.peek().kind, TokenKind::Keyword(Keyword::Given))
     }
 
     fn recover_item(&mut self) {

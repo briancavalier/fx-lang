@@ -151,3 +151,25 @@ cargo run -q -p fx-cli -- compile --target js --out-dir /tmp/fxl-phase-3 example
 node /tmp/fxl-phase-3/resume.mjs
 node /tmp/fxl-phase-3/effects.mjs
 ```
+
+## Phase 4
+
+Phase 4 examples are goal targets for named scopes, scoped effect families,
+scope-polymorphic effect rows, explicit scoped operation calls, and
+`within` operation elision:
+
+- `phase-4/state.fx`
+- `phase-4/polymorphic.fx`
+- `phase-4/diagnostics.fx`
+
+Before Phase 4 implementation lands, these examples are not expected to parse
+or check. As support lands, promote `state.fx` and `polymorphic.fx` into
+expected-passing parser, checker, diagnostics, hover, and go-to-definition
+fixtures. Promote `diagnostics.fx` into focused negative fixtures with stable
+scoped-effect messages.
+
+Try all Phase 4 examples once implementation begins:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-4
+```

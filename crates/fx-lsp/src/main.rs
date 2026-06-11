@@ -378,6 +378,7 @@ fn completion_item_kind(kind: FxSymbolKind) -> CompletionItemKind {
         FxSymbolKind::Constructor => CompletionItemKind::CONSTRUCTOR,
         FxSymbolKind::Effect => CompletionItemKind::INTERFACE,
         FxSymbolKind::Operation => CompletionItemKind::FUNCTION,
+        FxSymbolKind::Scope => CompletionItemKind::VARIABLE,
     }
 }
 
@@ -431,6 +432,7 @@ fn lsp_symbol_kind(kind: FxSymbolKind) -> LspSymbolKind {
         FxSymbolKind::Constructor => LspSymbolKind::CONSTRUCTOR,
         FxSymbolKind::Effect => LspSymbolKind::INTERFACE,
         FxSymbolKind::Operation => LspSymbolKind::FUNCTION,
+        FxSymbolKind::Scope => LspSymbolKind::VARIABLE,
     }
 }
 

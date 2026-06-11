@@ -458,21 +458,27 @@ Goal: scoped effect families and scope-polymorphic effect rows.
 This phase implements the named-scopes v0 design after ordinary effect rows and
 handlers are stable.
 
+Status as of 2026-06-11: implemented for syntax, formatting, module indexing,
+resolution, checking, LSP-adjacent symbol metadata, positive and negative
+examples, and compiler unsupported gating. JavaScript execution for scoped
+effects remains deferred; `fx compile --target js` reports scoped-effect
+unsupported diagnostics for accepted Phase 4 programs.
+
 Include:
 
 - `scoped effect Effect s ...` declarations;
 - `scope Name` declarations;
-- `scope Name : ProtocolShape` annotations;
+- `scope Name with <ProtocolShape>` protocol rows;
 - scope identities as type-level values suitable for effect rows;
 - scoped effect rows such as `a with <State Counter Int>`;
 - scope-polymorphic rows such as `a with <State s Int, ...e>`;
 - explicit scoped operation calls first;
-- `with-scope scope` as a default-scope provider for operation elision;
+- `within Scope` as a default-scope provider for operation elision;
 - operation elision only when the scoped effect family and active scope are
   unambiguous;
 - handler typing that removes only `Effect Scope`, leaving other scopes
   unhandled;
-- diagnostics for unknown scopes, invalid protocol annotations, ambiguous
+- diagnostics for unknown scopes, invalid scope protocol rows, ambiguous
   scoped operations, and scope mismatches.
 
 Defer:
@@ -481,7 +487,7 @@ Defer:
 - scope masking;
 - first-class handler names;
 - non-escape checking for locally generated scopes;
-- multiple protocol annotations per scope unless the design explicitly chooses
+- multiple protocol-row entries per scope unless the design explicitly chooses
   them.
 
 Type checker success criteria:
@@ -491,7 +497,7 @@ Type checker success criteria:
 - verifies scoped handlers affect only the named scope they handle;
 - reports ambiguity when two active scopes could satisfy the same unqualified
   operation;
-- elaborates `with-scope` operation elision to explicit scoped operation calls.
+- elaborates `within` operation elision to explicit scoped operation calls.
 
 Language server success criteria:
 
@@ -508,10 +514,10 @@ export scoped effect State s a
   get() : a
   put(value: a) : Unit
 
-scope Counter : State Int
+scope Counter with <State Int>
 
 increment() : Int with <State Counter Int>
-  with-scope Counter
+  within Counter
     n = get()
     put(n + 1)
     n

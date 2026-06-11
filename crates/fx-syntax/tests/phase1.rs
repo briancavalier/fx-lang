@@ -266,6 +266,59 @@ effect Emit a
 }
 
 #[test]
+fn parses_scoped_effect_and_scope_declarations() {
+    let parsed = parse_file(
+        r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+scope Session
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Effect(state) = &parsed.module.items[0] else {
+        panic!("expected scoped effect declaration");
+    };
+    assert!(state.export);
+    assert!(state.scoped);
+    assert_eq!(state.name.text, "State");
+    assert_eq!(state.params.len(), 2);
+    assert_eq!(state.params[0].text, "s");
+    assert_eq!(state.operations.len(), 2);
+
+    let Item::Scope(counter) = &parsed.module.items[1] else {
+        panic!("expected scope declaration");
+    };
+    assert_eq!(counter.name.text, "Counter");
+    let protocol = counter.protocol.as_ref().expect("expected protocol row");
+    assert_eq!(protocol.effects.len(), 1);
+    assert!(protocol.tail.is_none());
+
+    let Item::Scope(session) = &parsed.module.items[2] else {
+        panic!("expected bare scope declaration");
+    };
+    assert_eq!(session.name.text, "Session");
+    assert!(session.protocol.is_none());
+}
+
+#[test]
+fn reports_scoped_effect_without_scope_parameter() {
+    let parsed = parse_file(
+        r#"scoped effect Bad
+  bad() : Unit
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scoped effect declarations require a scope parameter")
+    }));
+}
+
+#[test]
 fn parses_effect_rows_in_result_and_function_types() {
     let parsed = parse_file(
         r#"safe-divide(x: Int, y: Int) : Int with <Raise>
@@ -294,6 +347,72 @@ catch(action: () -> a with <Raise, ...e>) : a with <...e>
     };
     assert_eq!(effects.effects.len(), 0);
     assert!(effects.tail.is_some());
+}
+
+#[test]
+fn parses_scoped_effect_rows() {
+    let parsed = parse_file(
+        r#"increment() : Int with <State Counter Int, ...e>
+  get(Counter)
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(increment) = &parsed.module.items[0] else {
+        panic!("expected value declaration");
+    };
+    let TypeExpr::Effect { effects, .. } = &increment.annotation else {
+        panic!("expected effectful return type");
+    };
+    assert_eq!(effects.effects.len(), 1);
+    assert!(effects.tail.is_some());
+    assert!(matches!(effects.effects[0], TypeExpr::App { .. }));
+}
+
+#[test]
+fn parses_within_expressions() {
+    let parsed = parse_file(
+        r#"increment() : Int with <State Counter Int>
+  within Counter
+    n = get()
+    put(n + 1)
+    n
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(increment) = &parsed.module.items[0] else {
+        panic!("expected value declaration");
+    };
+    let Expr::Within { scope, body, .. } = increment.body.result.as_ref() else {
+        panic!("expected within expression");
+    };
+    assert_eq!(scope.text, "Counter");
+    assert_eq!(body.statements.len(), 2);
+}
+
+#[test]
+fn reports_old_scope_protocol_colon_spelling() {
+    let parsed = parse_file("scope Counter : State Int\n");
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scope protocol rows use `with <...>`")
+    }));
+}
+
+#[test]
+fn parses_phase_4_goal_fixtures() {
+    for source in [
+        include_str!("../../../examples/phase-4/state.fx"),
+        include_str!("../../../examples/phase-4/polymorphic.fx"),
+        include_str!("../../../examples/phase-4/diagnostics.fx"),
+    ] {
+        let parsed = parse_file(source);
+
+        assert_eq!(parsed.diagnostics, []);
+    }
 }
 
 #[test]

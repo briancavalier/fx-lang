@@ -1,7 +1,8 @@
 use crate::ast::{
     BinaryOp, Block, EffectDecl, EffectRow, Expr, FieldExpr, FieldType, HandlerClause,
     HandlerReturnClause, ImportDecl, Item, LambdaParam, LetStmt, MatchArm, Name, OperationDecl,
-    Param, Pattern, RowTail, Stmt, TypeDecl, TypeExpr, ValueDecl, VariantCaseType, WithTarget,
+    Param, Pattern, RowTail, ScopeDecl, Stmt, TypeDecl, TypeExpr, ValueDecl, VariantCaseType,
+    WithTarget,
 };
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{SyntaxTokenKind, lex_source};
@@ -249,6 +250,7 @@ fn format_item(output: &mut String, item: &Item) {
         Item::Import(item) => format_import(output, item),
         Item::Type(item) => format_type_decl(output, item),
         Item::Effect(item) => format_effect_decl(output, item),
+        Item::Scope(item) => format_scope_decl(output, item),
         Item::Value(item) => format_value_decl(output, item),
     }
 }
@@ -275,7 +277,11 @@ fn format_effect_decl(output: &mut String, item: &EffectDecl) {
     if item.export {
         output.push_str("export ");
     }
-    output.push_str("effect ");
+    if item.scoped {
+        output.push_str("scoped effect ");
+    } else {
+        output.push_str("effect ");
+    }
     output.push_str(&item.name.text);
     format_type_params(output, &item.params);
     output.push('\n');
@@ -283,6 +289,19 @@ fn format_effect_decl(output: &mut String, item: &EffectDecl) {
         output.push_str("  ");
         format_operation_decl(output, operation);
     }
+}
+
+fn format_scope_decl(output: &mut String, item: &ScopeDecl) {
+    if item.export {
+        output.push_str("export ");
+    }
+    output.push_str("scope ");
+    output.push_str(&item.name.text);
+    if let Some(protocol) = &item.protocol {
+        output.push_str(" with ");
+        output.push_str(&format_effect_row(protocol));
+    }
+    output.push('\n');
 }
 
 fn format_operation_decl(output: &mut String, operation: &OperationDecl) {
@@ -493,6 +512,7 @@ fn format_expr(expr: &Expr) -> String {
         } => format_match_expr(scrutinee, arms),
         Expr::Pipeline { .. } => format_pipeline_expr(expr),
         Expr::With { targets, body, .. } => format_with_expr(targets, body),
+        Expr::Within { scope, body, .. } => format_within_expr(scope, body),
         Expr::Handle {
             action,
             clauses,
@@ -625,6 +645,13 @@ fn format_with_expr(targets: &[WithTarget], body: &Block) -> String {
     output
 }
 
+fn format_within_expr(scope: &Name, body: &Block) -> String {
+    let mut output = format!("within {}", scope.text);
+    output.push('\n');
+    output.push_str(&format_block(body, 1));
+    output
+}
+
 fn format_handle_expr(
     action: &Expr,
     clauses: &[HandlerClause],
@@ -707,7 +734,7 @@ fn format_pattern(pattern: &Pattern) -> String {
 fn is_inline_expr(expr: &Expr) -> bool {
     !matches!(
         expr,
-        Expr::Match { .. } | Expr::With { .. } | Expr::Handle { .. }
+        Expr::Match { .. } | Expr::With { .. } | Expr::Within { .. } | Expr::Handle { .. }
     )
 }
 

@@ -163,7 +163,17 @@ impl ModuleResolver<'_> {
                 Item::Import(_) => {}
                 Item::Type(decl) => self.resolve_type_decl(decl),
                 Item::Effect(_) => {}
+                Item::Scope(decl) => self.resolve_scope_decl(decl),
                 Item::Value(decl) => self.resolve_value_decl(decl),
+            }
+        }
+    }
+
+    fn resolve_scope_decl(&mut self, decl: &ScopeDecl) {
+        if let Some(protocol) = &decl.protocol {
+            let type_params = BTreeSet::new();
+            for effect in &protocol.effects {
+                self.resolve_effect_expr(effect, &type_params);
             }
         }
     }
@@ -278,6 +288,12 @@ impl ModuleResolver<'_> {
             Expr::With { targets, body, .. } => {
                 for target in targets {
                     self.resolve_expr(&target.target, locals);
+                }
+                self.resolve_block(body, &mut locals.clone());
+            }
+            Expr::Within { scope, body, .. } => {
+                if !locals.contains(scope.text.as_str()) {
+                    self.resolve_symbol_name(&scope.text, scope.span, Some(SymbolKind::Scope));
                 }
                 self.resolve_block(body, &mut locals.clone());
             }
@@ -419,7 +435,7 @@ impl ModuleResolver<'_> {
             TypeExpr::App { callee, args, .. } => {
                 self.resolve_effect_expr(callee, type_params);
                 for arg in args {
-                    self.resolve_type_expr(arg, type_params);
+                    self.resolve_effect_arg_expr(arg, type_params);
                 }
             }
             TypeExpr::Var(name) => {
@@ -427,6 +443,49 @@ impl ModuleResolver<'_> {
                     self.resolve_symbol_name(&name.text, name.span, Some(SymbolKind::Effect));
                 }
             }
+            other => self.resolve_type_expr(other, type_params),
+        }
+    }
+
+    fn resolve_effect_arg_expr(&mut self, ty: &TypeExpr, type_params: &BTreeSet<String>) {
+        match ty {
+            TypeExpr::Named { path, span } => {
+                let name = path
+                    .iter()
+                    .map(|name| name.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if is_builtin_type(&name) || type_params.contains(name.as_str()) {
+                    return;
+                }
+                if resolve_visible_symbol(self.module, self.symbols, &name, Some(SymbolKind::Type))
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    || resolve_visible_symbol(
+                        self.module,
+                        self.symbols,
+                        &name,
+                        Some(SymbolKind::Scope),
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    return;
+                }
+                self.diagnostics.push(Diagnostic::new(
+                    *span,
+                    format!("unknown type or scope `{name}`"),
+                ));
+            }
+            TypeExpr::App { callee, args, .. } => {
+                self.resolve_effect_arg_expr(callee, type_params);
+                for arg in args {
+                    self.resolve_effect_arg_expr(arg, type_params);
+                }
+            }
+            TypeExpr::Var(_) => {}
             other => self.resolve_type_expr(other, type_params),
         }
     }
@@ -551,6 +610,7 @@ fn describe_name(kind: Option<SymbolKind>, name: &str) -> String {
         Some(SymbolKind::Constructor) => format!("constructor `{name}`"),
         Some(SymbolKind::Effect) => format!("effect `{name}`"),
         Some(SymbolKind::Operation) => format!("operation `{name}`"),
+        Some(SymbolKind::Scope) => format!("scope `{name}`"),
         Some(SymbolKind::Value) => format!("value `{name}`"),
         None => format!("name `{name}`"),
     }

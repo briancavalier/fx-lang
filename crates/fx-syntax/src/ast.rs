@@ -20,6 +20,7 @@ pub enum Item {
     Import(ImportDecl),
     Type(TypeDecl),
     Effect(EffectDecl),
+    Scope(ScopeDecl),
     Value(ValueDecl),
 }
 
@@ -29,6 +30,7 @@ impl Item {
             Item::Import(item) => item.span,
             Item::Type(item) => item.span,
             Item::Effect(item) => item.span,
+            Item::Scope(item) => item.span,
             Item::Value(item) => item.span,
         }
     }
@@ -52,9 +54,18 @@ pub struct TypeDecl {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectDecl {
     pub export: bool,
+    pub scoped: bool,
     pub name: Name,
     pub params: Vec<Name>,
     pub operations: Vec<OperationDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScopeDecl {
+    pub export: bool,
+    pub name: Name,
+    pub protocol: Option<EffectRow>,
     pub span: Span,
 }
 
@@ -261,6 +272,11 @@ pub enum Expr {
         body: Block,
         span: Span,
     },
+    Within {
+        scope: Name,
+        body: Block,
+        span: Span,
+    },
     Handle {
         action: Box<Expr>,
         clauses: Vec<HandlerClause>,
@@ -297,6 +313,7 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::Pipeline { span, .. }
             | Expr::With { span, .. }
+            | Expr::Within { span, .. }
             | Expr::Handle { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Error { span } => *span,

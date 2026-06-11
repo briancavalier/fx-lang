@@ -45,6 +45,7 @@ pub enum SymbolKind {
     Constructor,
     Effect,
     Operation,
+    Scope,
 }
 
 pub fn index_workspace(root: &Path, files: Vec<SourceFile>) -> ModuleGraph {
@@ -173,6 +174,19 @@ fn index_module(module: &str, ast: &Module) -> (Vec<Symbol>, Vec<String>, Vec<Di
                     );
                 }
             }
+            Item::Scope(decl) => add_symbol(
+                &mut symbols,
+                &mut seen,
+                &mut diagnostics,
+                Symbol {
+                    module: module.to_string(),
+                    name: decl.name.text.clone(),
+                    qualified_name: format!("{module}.{}", decl.name.text),
+                    kind: SymbolKind::Scope,
+                    exported: decl.export,
+                    span: decl.name.span,
+                },
+            ),
             Item::Value(decl) => add_symbol(
                 &mut symbols,
                 &mut seen,

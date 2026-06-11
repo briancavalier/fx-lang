@@ -53,8 +53,8 @@ would be a normal value passed to ordinary effect operations:
 ```fx
 scope SubmitOrder
 
-abort(scope: s) : never ! <Abort s>
-using-managed(scope: s, acquire: () -> Managed a) : a ! <Finally s, ...e>
+abort(region: s) : never ! <Abort s>
+using-managed(region: s, acquire: () -> Managed a) : a ! <Finally s, ...e>
 
 submit-order() : OrderResult ! <Abort SubmitOrder, Finally SubmitOrder, ...e>
   session = using-managed(SubmitOrder, open-order-session)
@@ -101,26 +101,26 @@ Concrete scope declarations introduce named scope identities:
 
 ```fx
 scope SubmitOrder
-scope SessionState : State Session
-scope AgentEvents : Yield AgentEvent Unit
+scope SessionState with <State Session>
+scope AgentEvents with <Yield AgentEvent Unit>
 ```
 
-The annotation on a `scope` declaration describes the scoped protocol shape
+The protocol row on a `scope` declaration describes the scoped protocol shape
 supported by that scope. It omits the scope parameter itself. For example,
-`scope Counter : State Int` means `Counter` can be used in rows as
+`scope Counter with <State Int>` means `Counter` can be used in rows as
 `State Counter Int`.
 
 Effect rows mention both the scoped effect family and the scope:
 
 ```fx
 submit-order() : OrderResult ! <Abort SubmitOrder, Finally SubmitOrder, ...e>
-  with-scope SubmitOrder
+  within SubmitOrder
     session = using-managed(open-order-session)
     if token-expired() then abort()
     submit(session)
 ```
 
-Inside `with-scope SubmitOrder`, unqualified scoped operations can resolve to
+Inside `within SubmitOrder`, unqualified scoped operations can resolve to
 `SubmitOrder` when the operation and scope are unambiguous. The body above
 elaborates as though `abort()` and `using-managed(...)` were called with
 `SubmitOrder`.
@@ -128,8 +128,8 @@ elaborates as though `abort()` and `using-managed(...)` were called with
 Reusable code can remain scope-polymorphic:
 
 ```fx
-submit-order(scope: s) : OrderResult ! <Abort s, Finally s, ...e>
-  with-scope scope
+submit-order(current: s) : OrderResult ! <Abort s, Finally s, ...e>
+  within current
     session = using-managed(open-order-session)
     if token-expired() then abort()
     submit(session)
@@ -148,7 +148,7 @@ Strengths:
 Weaknesses:
 
 - Requires the type checker to track scope parameters in effect rows.
-- Requires an elaboration rule for scope argument elision inside `with-scope`.
+- Requires an elaboration rule for scope argument elision inside `within`.
 - Needs clear ambiguity errors when more than one active scope could satisfy an
   operation.
 
@@ -189,12 +189,12 @@ Core forms:
 
 ```fx
 scope Name
-scope Name : ScopedEffectShape
+scope Name with <ScopeProtocol>
 
 export scoped effect Effect s ...
   operation(...) : Result
 
-with-scope scope
+within Scope
   body
 ```
 
@@ -216,7 +216,7 @@ Rules:
 - Scope variables are ordinary type variables and may appear in effect rows.
 - Scope polymorphism abstracts over a caller-supplied scope. It does not create
   fresh scopes.
-- `with-scope s` establishes a default scope for scoped operations in its body.
+- `within s` establishes a default scope for scoped operations in its body.
 - Scope argument elision is allowed only when the operation's scoped effect
   family and active scope are unambiguous.
 - Public and reusable APIs should usually expose a scope parameter rather than
@@ -229,7 +229,7 @@ Rules:
 Handlers should stay function-like:
 
 ```fx
-with-state(scope: s, initial: a, action: () -> r ! <State s a, ...e>) : r ! <...e>
+with-state(cell: s, initial: a, action: () -> r ! <State s a, ...e>) : r ! <...e>
   handle action()
     get(resume) ->
       ...
@@ -263,7 +263,7 @@ Scoped abort and finalization:
 scope SubmitOrder
 
 submit-order() : OrderResult ! <Abort SubmitOrder, Finally SubmitOrder, Console>
-  with-scope SubmitOrder
+  within SubmitOrder
     session = using-managed(open-order-session)
 
     if token-expired()
@@ -277,18 +277,18 @@ submit-order() : OrderResult ! <Abort SubmitOrder, Finally SubmitOrder, Console>
 Scope-polymorphic helper:
 
 ```fx
-with-restart(scope: s, action: () -> a ! <Abort s, Finally s, ...e>) : a ! <Abort s, Finally s, ...e>
-  with restart-on-abort(scope, restarts: 1)
+with-restart(region: s, action: () -> a ! <Abort s, Finally s, ...e>) : a ! <Abort s, Finally s, ...e>
+  with restart-on-abort(region, restarts: 1)
     action()
 ```
 
 Scoped state:
 
 ```fx
-scope Counter : State Int
+scope Counter with <State Int>
 
 increment() : Int ! <State Counter Int>
-  with-scope Counter
+  within Counter
     n = get()
     put(n + 1)
     n
@@ -297,18 +297,18 @@ increment() : Int ! <State Counter Int>
 Scoped yield:
 
 ```fx
-scope AgentEvents : Yield AgentEvent Unit
+scope AgentEvents with <Yield AgentEvent Unit>
 
 publish(event: AgentEvent) : Unit ! <Yield AgentEvents AgentEvent Unit>
-  with-scope AgentEvents
+  within AgentEvents
     yield(event)
 ```
 
 ## Open questions
 
-- Should `scope Name : State Int` be sugar for attaching a single scoped effect
-  shape, or should a scope be allowed to declare several supported scoped
-  protocols?
+- Should `scope Name with <State Int>` remain limited to one protocol-row
+  entry in v0, or should a scope be allowed to declare several supported
+  scoped protocols?
 - Should operation names from different active scoped effects be resolved by
   expected type, or should ambiguity always require an explicit scope argument?
 - Should explicit scoped calls use `abort(SubmitOrder)` or a distinct syntax

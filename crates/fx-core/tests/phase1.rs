@@ -2637,6 +2637,221 @@ fn analysis_owns_operator_diagnostics_by_checked_path() {
     assert_path_has_diagnostic(&analysis, &lib_path, "`+` expects `Int` operands");
 }
 
+#[test]
+fn indexes_scope_and_scoped_effect_symbols() {
+    let graph = index_workspace(
+        &PathBuf::from("examples/phase-4"),
+        vec![source(
+            "examples/phase-4/state.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+"#,
+        )],
+    );
+
+    assert_eq!(graph.diagnostics, []);
+    let module = graph.modules.get("state").expect("state module");
+    let symbols = module
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol.kind, symbol.exported))
+        .collect::<Vec<_>>();
+
+    assert!(symbols.contains(&("State", SymbolKind::Effect, true)));
+    assert!(symbols.contains(&("get", SymbolKind::Operation, true)));
+    assert!(symbols.contains(&("put", SymbolKind::Operation, true)));
+    assert!(symbols.contains(&("Counter", SymbolKind::Scope, false)));
+}
+
+#[test]
+fn checks_explicit_scoped_operation_calls() {
+    let result = check_single(
+        "examples/phase-4/state.fx",
+        r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+increment() : Int with <State Counter Int>
+  n = get(Counter)
+  put(Counter, n + 1)
+  n
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_within_elided_scoped_operation_calls() {
+    let result = check_single(
+        "examples/phase-4/state.fx",
+        r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+increment() : Int with <State Counter Int>
+  within Counter
+    n = get()
+    put(n + 1)
+    n
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_phase_4_state_goal_fixture() {
+    let result = check_single(
+        "examples/phase-4/state.fx",
+        include_str!("../../../examples/phase-4/state.fx"),
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_phase_4_polymorphic_goal_fixture() {
+    let result = check_single(
+        "examples/phase-4/polymorphic.fx",
+        include_str!("../../../examples/phase-4/polymorphic.fx"),
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_scope_protocol_must_name_scoped_effect_family() {
+    let result = check_single(
+        "examples/phase-4/bad-protocol.fx",
+        r#"effect Console
+  log(message: Text) : Unit
+
+scope BadConsole with <Console>
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scope protocol row must name a scoped effect family")
+    }));
+}
+
+#[test]
+fn reports_scope_protocol_argument_arity() {
+    let result = check_single(
+        "examples/phase-4/bad-protocol.fx",
+        r#"scoped effect State s a
+  get() : a
+
+scope Missing with <State>
+scope Extra with <State Int Text>
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scope protocol `State` expects 1 argument, found 0")
+    }));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scope protocol `State` expects 1 argument, found 2")
+    }));
+}
+
+#[test]
+fn reports_multiple_scope_protocol_entries_for_v0() {
+    let result = check_single(
+        "examples/phase-4/bad-protocol.fx",
+        r#"scoped effect State s a
+  get() : a
+
+scoped effect Emit s a
+  emit(value: a) : Unit
+
+scope Mixed with <State Int, Emit Text>
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("scope protocol rows support one scoped effect family in Phase 4")
+    }));
+}
+
+#[test]
+fn scoped_handlers_remove_only_the_target_scope_effect() {
+    let result = check_single(
+        "examples/phase-4/state.fx",
+        r#"scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+scope OtherCounter with <State Int>
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+handled-counter() : Int
+  with with-state(Counter, 0)
+    within Counter
+      n = get()
+      put(n + 1)
+      n
+
+other-counter-still-unhandled() : Int with <State OtherCounter Int>
+  with with-state(Counter, 0)
+    within Counter
+      get()
+      get(OtherCounter)
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_ambiguous_elided_scoped_operation() {
+    let result = check_single(
+        "examples/phase-4/ambiguous.fx",
+        r#"scoped effect State s a
+  get() : a
+
+scope Counter with <State Int>
+scope Session with <State Int>
+
+ambiguous-elided-operation() : Int with <State Counter Int, State Session Int>
+  within Counter
+    within Session
+      get()
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("ambiguous elided scoped operation")
+    }));
+}
+
 fn todo_graph() -> fx_core::ModuleGraph {
     index_workspace(
         &PathBuf::from("examples/phase-1"),

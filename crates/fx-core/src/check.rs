@@ -96,6 +96,7 @@ pub enum TypedSpanKind {
     Type,
     Effect,
     Operation,
+    Scope,
     Constructor,
     Parameter,
     Local,
@@ -144,6 +145,7 @@ enum NameUse {
     Callee,
 }
 
+#[derive(Clone)]
 enum CallArg<'a> {
     Expr(&'a Expr),
     Synthetic { ty: Type, span: Span },
@@ -157,6 +159,7 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
     let mut typed_spans = BTreeMap::new();
     let (type_defs, mut lowering_diagnostics) = collect_type_definitions(graph);
     let symbol_types = collect_symbol_types(graph);
+    let effect_families = collect_effect_families(graph);
     let constructor_arities = collect_constructor_arities(graph);
     let symbol_tables = SymbolTables::new(graph);
 
@@ -168,10 +171,12 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
                 .unwrap_or_default(),
             top_level: collect_visible_types(module, &symbol_tables, &symbol_types),
             symbol_types: &symbol_types,
+            effect_families: &effect_families,
             type_defs: &type_defs,
             constructor_arities: &constructor_arities,
             symbol_tables: &symbol_tables,
             typed_spans: Vec::new(),
+            default_scopes: Vec::new(),
         };
         let checked = checker.check();
         let checked_diagnostics = checker.diagnostics;
@@ -194,15 +199,23 @@ struct CheckedModule {
     typed_spans: Vec<TypedSpan>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectFamilyInfo {
+    scoped: bool,
+    param_count: usize,
+}
+
 struct ModuleChecker<'a> {
     module: &'a IndexedModule,
     diagnostics: Vec<Diagnostic>,
     top_level: BTreeMap<String, Type>,
     symbol_types: &'a BTreeMap<String, Type>,
+    effect_families: &'a BTreeMap<String, EffectFamilyInfo>,
     type_defs: &'a BTreeMap<String, TypeDef>,
     constructor_arities: &'a BTreeMap<String, usize>,
     symbol_tables: &'a SymbolTables,
     typed_spans: Vec<TypedSpan>,
+    default_scopes: Vec<(Name, Type)>,
 }
 
 impl TypeVar {
@@ -308,7 +321,7 @@ impl EffectRowType {
 
     fn extend(&mut self, other: EffectRowType) {
         for effect in other.effects {
-            if !self.effects.contains(&effect) {
+            if !self.effects.iter().any(|existing| existing == &effect) {
                 self.effects.push(effect);
             }
         }
@@ -354,6 +367,14 @@ fn remove_effects(row: &mut EffectRowType, handled: &EffectRowType) -> bool {
     removed
 }
 
+fn effect_row_performed_by_action(handled: &EffectRowType, action: &EffectRowType) -> bool {
+    handled.effects.iter().all(|handled_effect| {
+        action.effects.iter().any(|action_effect| {
+            unify_compatible(action_effect, handled_effect, &mut Substitution::default()).is_ok()
+        })
+    })
+}
+
 fn expected_result_type(expected: &Type) -> Type {
     match expected {
         Type::Effectful { result, .. } => result.as_ref().clone(),
@@ -396,6 +417,8 @@ impl ModuleChecker<'_> {
     fn check(&mut self) -> CheckedModule {
         let items = self.module.parsed.module.items.clone();
         self.add_top_level_typed_spans();
+        self.check_scope_decls(&items);
+        self.check_effect_annotations(&items);
         for item in &items {
             if let Item::Value(decl) = item {
                 self.check_value_decl(decl);
@@ -404,6 +427,175 @@ impl ModuleChecker<'_> {
         CheckedModule {
             types: self.top_level.clone(),
             typed_spans: self.typed_spans.clone(),
+        }
+    }
+
+    fn check_scope_decls(&mut self, items: &[Item]) {
+        for item in items {
+            let Item::Scope(decl) = item else {
+                continue;
+            };
+            let Some(protocol) = &decl.protocol else {
+                continue;
+            };
+            if protocol.tail.is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    protocol.span,
+                    "scope protocol rows cannot use row tails in Phase 4",
+                ));
+            }
+            if protocol.effects.len() != 1 {
+                self.diagnostics.push(Diagnostic::new(
+                    protocol.span,
+                    "scope protocol rows support one scoped effect family in Phase 4",
+                ));
+            }
+            for effect in &protocol.effects {
+                let Some((family, arg_count, span)) = effect_row_member_parts(effect) else {
+                    self.diagnostics.push(Diagnostic::new(
+                        effect.span(),
+                        "scope protocol row must name a scoped effect family",
+                    ));
+                    continue;
+                };
+                let Some(info) = self.resolve_effect_family_info(&family, span) else {
+                    continue;
+                };
+                if !info.scoped {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "scope protocol row must name a scoped effect family",
+                    ));
+                    continue;
+                }
+                let expected = info.param_count.saturating_sub(1);
+                if arg_count != expected {
+                    self.diagnostics.push(Diagnostic::new(
+                        effect.span(),
+                        format!(
+                            "scope protocol `{family}` expects {expected} argument{}, found {}",
+                            if expected == 1 { "" } else { "s" },
+                            arg_count
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn check_effect_annotations(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Value(decl) => {
+                    for param in &decl.params {
+                        self.check_effect_annotation_type(&param.annotation);
+                    }
+                    self.check_effect_annotation_type(&decl.annotation);
+                }
+                Item::Effect(decl) => {
+                    for operation in &decl.operations {
+                        for param in &operation.params {
+                            self.check_effect_annotation_type(&param.annotation);
+                        }
+                        self.check_effect_annotation_type(&operation.result);
+                    }
+                }
+                Item::Type(decl) => self.check_effect_annotation_type(&decl.body),
+                Item::Import(_) | Item::Scope(_) => {}
+            }
+        }
+    }
+
+    fn check_effect_annotation_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::App { callee, args, .. } => {
+                self.check_effect_annotation_type(callee);
+                for arg in args {
+                    self.check_effect_annotation_type(arg);
+                }
+            }
+            TypeExpr::Function { params, result, .. } => {
+                for param in params {
+                    self.check_effect_annotation_type(param);
+                }
+                self.check_effect_annotation_type(result);
+            }
+            TypeExpr::Effect {
+                result, effects, ..
+            } => {
+                self.check_effect_annotation_type(result);
+                for effect in &effects.effects {
+                    self.check_effect_row_member(effect);
+                }
+            }
+            TypeExpr::Record { fields, .. } => {
+                for field in fields {
+                    self.check_effect_annotation_type(&field.value);
+                }
+            }
+            TypeExpr::Variant { cases, .. } => {
+                for case in cases {
+                    for payload in &case.payload {
+                        self.check_effect_annotation_type(payload);
+                    }
+                }
+            }
+            TypeExpr::Tuple { elems, .. } => {
+                for elem in elems {
+                    self.check_effect_annotation_type(elem);
+                }
+            }
+            TypeExpr::Named { .. } | TypeExpr::Var(_) | TypeExpr::Error { .. } => {}
+        }
+    }
+
+    fn check_effect_row_member(&mut self, effect: &TypeExpr) {
+        let Some((family, arg_count, span)) = effect_row_member_parts(effect) else {
+            return;
+        };
+        let Some(info) = self.resolve_effect_family_info(&family, span) else {
+            return;
+        };
+        if arg_count != info.param_count {
+            self.diagnostics.push(Diagnostic::new(
+                effect.span(),
+                format!(
+                    "effect row `{family}` expects {} argument{}, found {}",
+                    info.param_count,
+                    if info.param_count == 1 { "" } else { "s" },
+                    arg_count
+                ),
+            ));
+        }
+    }
+
+    fn resolve_effect_family_info(&mut self, family: &str, span: Span) -> Option<EffectFamilyInfo> {
+        match resolve_visible_symbol(
+            self.module,
+            self.symbol_tables,
+            family,
+            Some(SymbolKind::Effect),
+        ) {
+            Ok(Some(symbol)) => self.effect_families.get(&symbol.qualified_name).cloned(),
+            Ok(None) => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("unknown effect family `{family}`"),
+                ));
+                None
+            }
+            Err(symbols) => {
+                let candidates = symbols
+                    .iter()
+                    .map(|symbol| symbol.qualified_name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("ambiguous effect family `{family}`; candidates: {candidates}"),
+                ));
+                None
+            }
         }
     }
 
@@ -526,6 +718,7 @@ impl ModuleChecker<'_> {
                 attach_effects(expected_result_type(expected), effects)
             }
             Expr::With { .. } => self.check_inferred_expr(expr, env, expected),
+            Expr::Within { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Handle { .. } => self.check_handle_expr(expr, env, expected),
             _ => self.check_inferred_expr(expr, env, expected),
         }
@@ -760,6 +953,14 @@ impl ModuleChecker<'_> {
                 body,
                 span,
             } => self.infer_with_expr(targets, body, *span, env),
+            Expr::Within { scope, body, .. } => {
+                let scope_ty = self.resolve_expr_name(&scope.text, scope.span, env, NameUse::Value);
+                self.add_typed_span(scope.span, TypedSpanKind::Scope, &scope.text, &scope_ty);
+                self.default_scopes.push((scope.clone(), scope_ty));
+                let result = self.infer_block(body, env);
+                self.default_scopes.pop();
+                result
+            }
             Expr::Handle { .. } => self.check_handle_expr(expr, env, &Type::Unknown),
             Expr::Binary {
                 op,
@@ -790,6 +991,7 @@ impl ModuleChecker<'_> {
 
         let action_ty = self.infer_expr(action, env);
         let (action_result, mut remaining_effects) = split_effectful(action_ty);
+        let action_effects = remaining_effects.clone();
         let handler_result = match expected {
             Type::Unknown => action_result.clone(),
             _ => expected_result_type(expected),
@@ -813,7 +1015,7 @@ impl ModuleChecker<'_> {
                 &operation_ty,
             );
             let (payload_types, operation_result, operation_effects) =
-                self.handler_operation_signature(&operation_ty, &action_result);
+                self.handler_operation_signature(&operation_ty, &action_result, &action_effects);
             let mut expected_params = payload_types;
             expected_params.push(Type::Function(
                 vec![operation_result.clone()],
@@ -841,8 +1043,10 @@ impl ModuleChecker<'_> {
             let clause_ty = self.check_block(&clause.body, &clause_env, &handler_result);
             let (_, clause_effects) = split_effectful(clause_ty);
             handler_effects.extend(clause_effects);
-            if !remove_effects(&mut remaining_effects, &operation_effects)
+            let removed = remove_effects(&mut remaining_effects, &operation_effects);
+            if !removed
                 && !operation_effects.effects.is_empty()
+                && !effect_row_performed_by_action(&operation_effects, &action_effects)
             {
                 self.diagnostics.push(Diagnostic::new(
                     clause.operation.span,
@@ -895,6 +1099,7 @@ impl ModuleChecker<'_> {
         &mut self,
         operation_ty: &Type,
         action_result: &Type,
+        action_effects: &EffectRowType,
     ) -> (Vec<Type>, Type, EffectRowType) {
         let Type::Function(params, result) = operation_ty else {
             return (Vec::new(), Type::Unknown, EffectRowType::empty());
@@ -902,8 +1107,22 @@ impl ModuleChecker<'_> {
         let (operation_result, operation_effects) = split_effectful(result.as_ref().clone());
         let mut subst = Substitution::default();
         let _ = unify_compatible(&operation_result, action_result, &mut subst);
+        let mut drop_scope_param = false;
+        if scoped_operation_scope_param(params, &operation_effects).is_some()
+            && let Some(operation_effect) = operation_effects.effects.first()
+        {
+            for action_effect in &action_effects.effects {
+                let mut candidate = subst.clone();
+                if unify_compatible(action_effect, operation_effect, &mut candidate).is_ok() {
+                    subst = candidate;
+                    drop_scope_param = true;
+                    break;
+                }
+            }
+        }
         let params = params
             .iter()
+            .skip(if drop_scope_param { 1 } else { 0 })
             .map(|param| substitute(param, &subst))
             .collect::<Vec<_>>();
         (
@@ -1078,6 +1297,36 @@ impl ModuleChecker<'_> {
     ) -> Type {
         match callee_ty {
             Type::Function(params, result) => {
+                let scoped_args;
+                let args = if params.len() == args.len() + 1 {
+                    if self
+                        .default_scopes
+                        .iter()
+                        .filter(|(_, scope_ty)| self.compatible(&scope_ty, &params[0]))
+                        .take(2)
+                        .count()
+                        > 1
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            callee_span,
+                            "ambiguous elided scoped operation; pass the scope explicitly",
+                        ));
+                    }
+                    if let Some((scope, scope_ty)) = self.default_scopes.last() {
+                        scoped_args = std::iter::once(CallArg::Synthetic {
+                            ty: scope_ty.clone(),
+                            span: scope.span,
+                        })
+                        .chain(args.iter().cloned())
+                        .collect::<Vec<_>>();
+                        scoped_args.as_slice()
+                    } else {
+                        args
+                    }
+                } else {
+                    args
+                };
+
                 if params.len() != args.len() {
                     self.diagnostics.push(Diagnostic::new(
                         span,
@@ -1565,6 +1814,22 @@ impl ModuleChecker<'_> {
                         }
                     }
                 }
+                Item::Scope(decl) => {
+                    self.add_typed_span_display(
+                        decl.name.span,
+                        TypedSpanKind::Scope,
+                        &decl.name.text,
+                        if let Some(protocol) = &decl.protocol {
+                            format!(
+                                "scope {} with {}",
+                                decl.name.text,
+                                protocol_display(protocol)
+                            )
+                        } else {
+                            format!("scope {}", decl.name.text)
+                        },
+                    );
+                }
                 Item::Type(decl) => {
                     let ty = Type::Named {
                         name: decl.name.text.clone(),
@@ -1797,11 +2062,16 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                         args: effect_args,
                     };
                     for operation in &decl.operations {
-                        let params = operation
+                        let mut params: Vec<Type> = operation
                             .params
                             .iter()
                             .map(|param| lowerer.lower_type(&param.annotation))
                             .collect();
+                        if decl.scoped
+                            && let Some(scope_param) = decl.params.first()
+                        {
+                            params.insert(0, Type::Var(lowerer.type_var(scope_param)));
+                        }
                         let result = lowerer.lower_type(&operation.result);
                         types.insert(
                             format!("{}.{}", module.name, operation.name.text),
@@ -1815,11 +2085,38 @@ fn collect_symbol_types(graph: &ModuleGraph) -> BTreeMap<String, Type> {
                         );
                     }
                 }
+                Item::Scope(decl) => {
+                    types.insert(
+                        format!("{}.{}", module.name, decl.name.text),
+                        Type::Named {
+                            name: decl.name.text.clone(),
+                            args: Vec::new(),
+                        },
+                    );
+                }
                 Item::Import(_) => {}
             }
         }
     }
     types
+}
+
+fn collect_effect_families(graph: &ModuleGraph) -> BTreeMap<String, EffectFamilyInfo> {
+    let mut families = BTreeMap::new();
+    for module in graph.modules.values() {
+        for item in &module.parsed.module.items {
+            if let Item::Effect(decl) = item {
+                families.insert(
+                    format!("{}.{}", module.name, decl.name.text),
+                    EffectFamilyInfo {
+                        scoped: decl.scoped,
+                        param_count: decl.params.len(),
+                    },
+                );
+            }
+        }
+    }
+    families
 }
 
 fn collect_constructor_arities(graph: &ModuleGraph) -> BTreeMap<String, usize> {
@@ -2192,6 +2489,48 @@ fn compatible(found: &Type, expected: &Type) -> Result<(), CompatibilityError> {
     unify_compatible(found, expected, &mut subst)
 }
 
+fn effect_row_member_parts(effect: &TypeExpr) -> Option<(String, usize, Span)> {
+    match effect {
+        TypeExpr::Named { path, span } => Some((
+            path.iter()
+                .map(|name| name.text.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+            0,
+            *span,
+        )),
+        TypeExpr::App { callee, args, .. } => {
+            let (family, base_args, span) = effect_row_member_parts(callee)?;
+            Some((family, base_args + args.len(), span))
+        }
+        TypeExpr::Var(_)
+        | TypeExpr::Function { .. }
+        | TypeExpr::Effect { .. }
+        | TypeExpr::Record { .. }
+        | TypeExpr::Variant { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Error { .. } => None,
+    }
+}
+
+fn scoped_operation_scope_param<'a>(
+    params: &'a [Type],
+    operation_effects: &EffectRowType,
+) -> Option<&'a Type> {
+    let scope_param = params.first()?;
+    let Type::Named { args, .. } = operation_effects.effects.first()? else {
+        return None;
+    };
+    if args
+        .first()
+        .is_some_and(|scope_arg| scope_arg == scope_param)
+    {
+        Some(scope_param)
+    } else {
+        None
+    }
+}
+
 fn unify_compatible(
     found: &Type,
     expected: &Type,
@@ -2281,6 +2620,14 @@ fn unify_effect_rows(
         };
         remaining.remove(index);
     }
+
+    remaining.retain(|found_effect| {
+        let found_effect = substitute(found_effect, subst);
+        !expected
+            .effects
+            .iter()
+            .any(|expected_effect| found_effect == substitute(expected_effect, subst))
+    });
 
     if let Some(RowTailType::Var(name)) = &expected.tail {
         subst.effects.insert(
@@ -2458,6 +2805,43 @@ fn effect_label(effect: &Type) -> String {
     match effect {
         Type::Named { name, args } if args.is_empty() => name.clone(),
         other => other.to_string(),
+    }
+}
+
+fn protocol_display(row: &EffectRow) -> String {
+    let mut parts = row
+        .effects
+        .iter()
+        .map(type_expr_display)
+        .collect::<Vec<_>>();
+    if let Some(tail) = &row.tail {
+        parts.push(format!("...{}", tail.name.text));
+    }
+    format!("<{}>", parts.join(", "))
+}
+
+fn type_expr_display(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Named { path, .. } => path
+            .iter()
+            .map(|name| name.text.as_str())
+            .collect::<Vec<_>>()
+            .join("."),
+        TypeExpr::Var(name) => name.text.clone(),
+        TypeExpr::App { callee, args, .. } => {
+            let mut out = type_expr_display(callee);
+            for arg in args {
+                out.push(' ');
+                out.push_str(&type_expr_display(arg));
+            }
+            out
+        }
+        TypeExpr::Function { .. }
+        | TypeExpr::Effect { .. }
+        | TypeExpr::Record { .. }
+        | TypeExpr::Variant { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Error { .. } => "<type>".to_string(),
     }
 }
 

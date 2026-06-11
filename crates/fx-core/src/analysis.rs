@@ -291,6 +291,9 @@ fn local_definition_in_expr(
                 local_definition_in_expr(&target.target, byte_offset, locals, module)
             })
             .or_else(|| local_definition_in_block(body, byte_offset, &mut locals.clone(), module)),
+        Expr::Within { body, .. } => {
+            local_definition_in_block(body, byte_offset, &mut locals.clone(), module)
+        }
         Expr::Handle {
             action,
             clauses,

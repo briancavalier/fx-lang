@@ -95,10 +95,12 @@ pub enum Keyword {
     True,
     False,
     Effect,
+    Scoped,
     Handle,
     Given,
     Scope,
     With,
+    Within,
 }
 
 pub(crate) fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
@@ -357,10 +359,12 @@ fn lex_ident(source: &str, tokens: &mut Vec<SyntaxToken>, start: usize, i: &mut 
         "true" => SyntaxTokenKind::Keyword(Keyword::True),
         "false" => SyntaxTokenKind::Keyword(Keyword::False),
         "effect" => SyntaxTokenKind::Keyword(Keyword::Effect),
+        "scoped" => SyntaxTokenKind::Keyword(Keyword::Scoped),
         "handle" => SyntaxTokenKind::Keyword(Keyword::Handle),
         "given" => SyntaxTokenKind::Keyword(Keyword::Given),
         "scope" => SyntaxTokenKind::Keyword(Keyword::Scope),
         "with" => SyntaxTokenKind::Keyword(Keyword::With),
+        "within" => SyntaxTokenKind::Keyword(Keyword::Within),
         _ => SyntaxTokenKind::Ident(text.to_string()),
     };
     tokens.push(SyntaxToken {
