@@ -523,6 +523,72 @@ increment() : Int with <State Counter Int>
     n
 ```
 
+## Phase 4.1: Scoped effect runtime
+
+Goal: make checked Phase 4 scoped-effect programs executable by the JavaScript
+compiler and runtime.
+
+This phase follows the completed Phase 4 static/tooling work. Phase 4
+established syntax, rows, checking, diagnostics, examples, and compiler
+unsupported gating. Phase 4.1 replaces that gating with executable scoped
+effect semantics where runtime support is covered by tests.
+
+Include:
+
+- lower scope declarations into stable runtime scope identities;
+- lower scoped operation requests with both operation identity and scope
+  identity;
+- compile `within` and elided calls using the checker's scoped-call behavior,
+  so runtime lowering sees explicit scoped operation requests;
+- extend handler dispatch to match scoped requests by operation or effect
+  family plus scope;
+- ensure handlers for one scope leave same-family requests from other scopes
+  unhandled;
+- keep ordinary Phase 3 effect runtime behavior unchanged;
+- remove the current scoped-effect compiler unsupported diagnostics only after
+  runtime support is covered by tests.
+
+Defer:
+
+- fresh scope creation;
+- scope masking;
+- first-class handler names;
+- non-escape checking for locally generated scopes;
+- multiple protocol-row entries per scope;
+- coeffects and `given`;
+- capability or protocol authorization beyond current checker validation.
+
+Compiler success criteria:
+
+- `fx compile --target js examples/phase-4/state.fx` succeeds;
+- generated JavaScript for `state.fx` executes a concrete scoped-state example;
+- a handler for `State Counter Int` does not handle `State OtherCounter Int`;
+- scope-polymorphic helpers from `examples/phase-4/polymorphic.fx` compile when
+  instantiated with concrete scopes;
+- existing Phase 1 through Phase 3 executable examples continue to compile and
+  run unchanged;
+- compiler unsupported diagnostics remain for any scoped construct not
+  implemented in Phase 4.1.
+
+Test targets:
+
+- compiler lowering tests for scoped operation requests carrying scope identity;
+- generated JavaScript smoke tests for concrete scoped state;
+- generated JavaScript smoke tests for `within` elision;
+- generated JavaScript smoke tests for explicit scoped calls;
+- generated JavaScript smoke tests for the same effect family with two scopes;
+- generated JavaScript smoke tests for a scope-polymorphic helper instantiated
+  with concrete scopes.
+
+Validation commands:
+
+- `cargo test`;
+- `cargo check`;
+- `cargo run -p fx-cli -- check examples/phase-4/state.fx`;
+- `cargo run -p fx-cli -- check examples/phase-4/polymorphic.fx`;
+- `cargo run -p fx-cli -- compile --target js examples/phase-4/state.fx`;
+- `cargo run -p fx-cli -- compile --target js examples/phase-4/polymorphic.fx`.
+
 ## Phase 5: Coeffects and `given`
 
 Goal: contextual requirements after effects and scoped effects are stable.
