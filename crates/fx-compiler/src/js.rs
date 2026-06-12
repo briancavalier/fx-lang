@@ -60,6 +60,7 @@ fn emit_module(module: &CoreModule) -> String {
 
     for declaration in &module.declarations {
         match declaration {
+            CoreDecl::Scope(declaration) => emit_scope_decl(&mut source, declaration),
             CoreDecl::Type(declaration) => emit_type_decl(&mut source, declaration),
             CoreDecl::Value(declaration) => {
                 let mut emitter = ExprEmitter::new(&module.name);
@@ -98,6 +99,17 @@ fn emit_node_entrypoint(source: &mut String, main: &CoreValueDecl) {
     source.push_str("    console.log(__fx_entry_value);\n");
     source.push_str("  }\n");
     source.push_str("}\n");
+}
+
+fn emit_scope_decl(source: &mut String, declaration: &CoreScopeDecl) {
+    if declaration.export {
+        source.push_str("export ");
+    }
+    source.push_str(&format!(
+        "const {} = Object.freeze({{ __fx_scope: true, key: {} }});\n",
+        global_identifier(&declaration.name),
+        string_literal(&display_global(&declaration.name))
+    ));
 }
 
 fn emit_type_decl(source: &mut String, declaration: &CoreTypeDecl) {
@@ -238,14 +250,11 @@ impl<'a> ExprEmitter<'a> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            CoreExprKind::Operation { operation, args } => format!(
-                "__fx.run(__fx.perform({}, [{}]))",
-                operation_key(operation),
-                args.iter()
-                    .map(|arg| self.expr(arg))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            CoreExprKind::Operation {
+                operation,
+                scoped,
+                args,
+            } => format!("__fx.run({})", self.perform(operation, scoped.as_ref(), args)),
             CoreExprKind::Handle { .. } => format!("__fx.run({})", self.computation(expr)),
             CoreExprKind::Record { fields } => self.record(fields),
             CoreExprKind::Field { target, field } => {
@@ -306,14 +315,11 @@ impl<'a> ExprEmitter<'a> {
 
     fn computation(&mut self, expr: &CoreExpr) -> String {
         match &expr.kind {
-            CoreExprKind::Operation { operation, args } => format!(
-                "__fx.perform({}, [{}])",
-                operation_key(operation),
-                args.iter()
-                    .map(|arg| self.expr(arg))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            CoreExprKind::Operation {
+                operation,
+                scoped,
+                args,
+            } => self.perform(operation, scoped.as_ref(), args),
             CoreExprKind::Handle {
                 action,
                 clauses,
@@ -329,12 +335,24 @@ impl<'a> ExprEmitter<'a> {
                             .chain(std::iter::once(local_identifier(&clause.resume)))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        format!(
-                            "{}: ({}) => {}",
-                            object_key(&display_global(&clause.operation)),
-                            params,
-                            self.computation(&clause.body)
-                        )
+                        let body = self.computation(&clause.body);
+                        if let Some(scoped) = &clause.scoped {
+                            format!(
+                                "{}: {{ family: {}, scope: {}, handler: ({}) => {} }}",
+                                object_key(&display_global(&clause.operation)),
+                                operation_key(&scoped.family),
+                                self.expr(&scoped.scope),
+                                params,
+                                body
+                            )
+                        } else {
+                            format!(
+                                "{}: ({}) => {}",
+                                object_key(&display_global(&clause.operation)),
+                                params,
+                                body
+                            )
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -445,6 +463,30 @@ impl<'a> ExprEmitter<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         format!("({{ {fields} }})")
+    }
+
+    fn perform(
+        &mut self,
+        operation: &CoreGlobalName,
+        scoped: Option<&CoreScopedRequest>,
+        args: &[CoreExpr],
+    ) -> String {
+        let payload = args
+            .iter()
+            .map(|arg| self.expr(arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Some(scoped) = scoped {
+            format!(
+                "__fx.performScoped({}, {}, {}, [{}])",
+                operation_key(operation),
+                operation_key(&scoped.family),
+                self.expr(&scoped.scope),
+                payload
+            )
+        } else {
+            format!("__fx.perform({}, [{}])", operation_key(operation), payload)
+        }
     }
 
     fn match_expr(&mut self, scrutinee: &CoreExpr, arms: &[CoreMatchArm]) -> String {

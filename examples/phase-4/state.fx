@@ -5,6 +5,7 @@ export scoped effect State s a
   put(value: a) : Unit
 
 scope Counter with <State Int>
+
 scope OtherCounter with <State Int>
 
 export explicit-increment() : Int with <State Counter Int>
@@ -28,14 +29,14 @@ with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with
       value
 
 export handled-counter() : Int
-  with with-state(Counter, 0)
-    within Counter
+  within Counter
+    with with-state(0)
       n = get()
       put(n + 1)
       n
 
 export other-counter-still-unhandled() : Int with <State OtherCounter Int>
-  with with-state(Counter, 0)
-    within Counter
+  within Counter
+    with with-state(0)
       get()
       get(OtherCounter)

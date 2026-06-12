@@ -20,8 +20,15 @@ pub struct CoreImport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreDecl {
+    Scope(CoreScopeDecl),
     Type(CoreTypeDecl),
     Value(CoreValueDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreScopeDecl {
+    pub name: CoreGlobalName,
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +116,7 @@ pub enum CoreExprKind {
     },
     Operation {
         operation: CoreGlobalName,
+        scoped: Option<CoreScopedRequest>,
         args: Vec<CoreExpr>,
     },
     Handle {
@@ -151,9 +159,16 @@ pub enum CoreExprKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreHandlerClause {
     pub operation: CoreGlobalName,
+    pub scoped: Option<CoreScopedRequest>,
     pub params: Vec<CoreLocalName>,
     pub resume: CoreLocalName,
     pub body: Box<CoreExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreScopedRequest {
+    pub family: CoreGlobalName,
+    pub scope: Box<CoreExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,9 +249,21 @@ impl CoreProgram {
 impl CoreDecl {
     fn push_debug(&self, output: &mut String, indent: usize) {
         match self {
+            CoreDecl::Scope(declaration) => declaration.push_debug(output, indent),
             CoreDecl::Type(declaration) => declaration.push_debug(output, indent),
             CoreDecl::Value(declaration) => declaration.push_debug(output, indent),
         }
+    }
+}
+
+impl CoreScopeDecl {
+    fn push_debug(&self, output: &mut String, indent: usize) {
+        let export = if self.export { " export" } else { "" };
+        push_line(
+            output,
+            indent,
+            format_args!("scope{} {}", export, self.name.display()),
+        );
     }
 }
 
@@ -295,7 +322,10 @@ impl CoreExpr {
                     arg.push_debug(output, indent + 1);
                 }
             }
-            CoreExprKind::Operation { args, .. } => {
+            CoreExprKind::Operation { scoped, args, .. } => {
+                if let Some(scoped) = scoped {
+                    scoped.scope.push_debug(output, indent + 1);
+                }
                 for arg in args {
                     arg.push_debug(output, indent + 1);
                 }
@@ -307,6 +337,9 @@ impl CoreExpr {
             } => {
                 action.push_debug(output, indent + 1);
                 for clause in clauses {
+                    if let Some(scoped) = &clause.scoped {
+                        scoped.scope.push_debug(output, indent + 1);
+                    }
                     clause.body.push_debug(output, indent + 1);
                 }
                 if let Some(return_clause) = return_clause {

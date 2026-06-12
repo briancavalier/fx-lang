@@ -318,6 +318,227 @@ export main() : Text
     assert_eq!(output, "event2event1");
 }
 
+#[test]
+fn scoped_explicit_operation_executes() {
+    let output = compile_and_run_main(
+        "scoped_explicit_operation",
+        "examples/phase-4",
+        vec![source(
+            "examples/phase-4/main.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+export main() : Int
+  with with-state(Counter, 41)
+    get(Counter) + 1
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "42");
+}
+
+#[test]
+fn scoped_within_elision_executes() {
+    let output = compile_and_run_main(
+        "scoped_within_elision",
+        "examples/phase-4",
+        vec![source(
+            "examples/phase-4/main.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+export main() : Int
+  with with-state(Counter, 41)
+    within Counter
+      get() + 1
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "42");
+}
+
+#[test]
+fn within_elides_scope_valued_function_arguments() {
+    let output = compile_and_run_main(
+        "within_elides_scope_function_arguments",
+        "examples/phase-4",
+        vec![source(
+            "examples/phase-4/main.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+export main() : Int
+  within Counter
+    with with-state(41)
+      get() + 1
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "42");
+}
+
+#[test]
+fn scoped_same_family_other_scope_remains_unhandled_at_runtime() {
+    let error = compile_and_run_module_directly_error(
+        "scoped_other_scope_unhandled",
+        "examples/phase-4",
+        vec![source(
+            "examples/phase-4/main.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+scope OtherCounter with <State Int>
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+export main() : Int with <State OtherCounter Int>
+  with with-state(Counter, 0)
+    within Counter
+      get()
+      get(OtherCounter)
+"#,
+        )],
+        "main",
+    );
+
+    assert!(error.contains("Unhandled fx operation main.get at main.OtherCounter"));
+}
+
+#[test]
+fn scoped_polymorphic_helper_executes_with_concrete_scope() {
+    let output = compile_and_run_main(
+        "scoped_polymorphic_helper",
+        "examples/phase-4",
+        vec![source(
+            "examples/phase-4/main.fx",
+            r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+scope Counter with <State Int>
+
+increment(cell: s) : Int with <State s Int>
+  within cell
+    n = get()
+    put(n + 1)
+    n
+
+with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+
+export main() : Int
+  with with-state(Counter, 41)
+    increment(Counter) + 1
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "42");
+}
+
+#[test]
+fn scoped_exported_scope_identity_executes_across_modules() {
+    let output = compile_and_run_main(
+        "scoped_exported_scope_identity",
+        "smoke",
+        vec![
+            source(
+                "smoke/support.fx",
+                r#"export scoped effect State s a
+  get() : a
+  put(value: a) : Unit
+
+export scope Counter with <State Int>
+
+export with-state(cell: s, initial: a, action: () -> r with <State s a, ...e>) : r with <...e>
+  handle action()
+    get(resume) ->
+      resume(initial)
+    put(_value, resume) ->
+      resume(unit)
+    return(value) ->
+      value
+"#,
+            ),
+            source(
+                "smoke/main.fx",
+                r#"import support
+
+export main() : Int
+  with with-state(Counter, 41)
+    get(Counter) + 1
+"#,
+            ),
+        ],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "42");
+}
+
 fn compile_and_run_main(
     prefix: &str,
     root: &str,
@@ -353,6 +574,38 @@ fn compile_and_run_main(
 
     String::from_utf8(output.stdout)
         .expect("node stdout is utf8")
+        .trim()
+        .to_string()
+}
+
+fn compile_and_run_module_directly_error(
+    prefix: &str,
+    root: &str,
+    files: Vec<SourceFile>,
+    module: &str,
+) -> String {
+    let analysis = analyze_workspace(&PathBuf::from(root), files);
+    let session = prepare_compile(analysis, CompileOptions::default()).expect("compile session");
+    let program = lower_to_core(&session).expect("core program");
+    let dir = temp_dir(prefix);
+    write_modules(&dir, emit_javascript_modules(&program));
+
+    let output = Command::new("node")
+        .arg(dir.join(format!("{module}.mjs")))
+        .output()
+        .expect("node executes generated JavaScript directly");
+
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        !output.status.success(),
+        "node succeeded unexpectedly\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stderr)
+        .expect("node stderr is utf8")
         .trim()
         .to_string()
 }

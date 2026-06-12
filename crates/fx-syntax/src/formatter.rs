@@ -461,11 +461,12 @@ fn format_statement(statement: &Stmt) -> String {
 }
 
 fn format_let_statement(statement: &LetStmt) -> String {
-    format!(
-        "{} =\n{}",
-        statement.name.text,
-        indent_text(&format_expr(&statement.value), 1)
-    )
+    let value = format_expr(&statement.value);
+    if is_inline_expr(&statement.value) && !value.contains('\n') {
+        format!("{} = {}", statement.name.text, value)
+    } else {
+        format!("{} =\n{}", statement.name.text, indent_text(&value, 1))
+    }
 }
 
 fn format_expr(expr: &Expr) -> String {
@@ -1016,8 +1017,7 @@ summarize(result: < Ok(Todo), Missing() >) : Text
         let expected = r#"type Todo = { title: Text, done: Bool }
 
 summarize(result: < Ok(Todo), Missing() >) : Text
-  label =
-    result |> inspect("todo")
+  label = result |> inspect("todo")
   match result
     Ok({ title, done }) -> if done then title ++ " [done]" else title
     Missing() -> "missing"
@@ -1053,6 +1053,32 @@ value() : Int
 value() : Int
   with catch(0)
     1
+"#;
+
+        let formatted = format_module(source).expect("formatted");
+        let second = format_module(&formatted.source).expect("second");
+
+        assert_eq!(formatted.source, expected);
+        assert!(!second.changed);
+    }
+
+    #[test]
+    fn formats_within_and_nested_with_without_expanding_inline_lets() {
+        let source = r#"value() : Int
+  within Counter
+    with with-state( 0 )
+      n =
+        get( )
+      put( n + 1 )
+      n
+"#;
+
+        let expected = r#"value() : Int
+  within Counter
+    with with-state(0)
+      n = get()
+      put(n + 1)
+      n
 "#;
 
         let formatted = format_module(source).expect("formatted");

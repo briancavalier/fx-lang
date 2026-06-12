@@ -28,6 +28,13 @@ struct ModuleLowerer<'a, 'b> {
     parent: &'a mut CoreLowerer<'b>,
     module: &'b fx_core::module::IndexedModule,
     typed_spans: &'b [TypedSpan],
+    default_scopes: Vec<CoreExpr>,
+}
+
+#[derive(Debug, Clone)]
+struct OperationInfo {
+    family: CoreGlobalName,
+    scoped: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +63,7 @@ impl CoreLowerer<'_> {
                     parent: self,
                     module,
                     typed_spans,
+                    default_scopes: Vec::new(),
                 }
                 .lower_module()
             })
@@ -97,19 +105,11 @@ impl ModuleLowerer<'_, '_> {
             .filter_map(|item| match item {
                 Item::Import(_) => None,
                 Item::Type(decl) => self.lower_type_decl(decl).map(CoreDecl::Type),
-                Item::Effect(decl) => {
-                    if decl.scoped {
-                        self.unsupported(
-                            decl.span,
-                            "scoped effect declarations are not executable yet",
-                        );
-                    }
-                    None
-                }
-                Item::Scope(decl) => {
-                    self.unsupported(decl.span, "scope declarations are not executable yet");
-                    None
-                }
+                Item::Effect(_) => None,
+                Item::Scope(decl) => Some(CoreDecl::Scope(CoreScopeDecl {
+                    name: self.global(&decl.name.text),
+                    export: decl.export,
+                })),
                 Item::Value(decl) => Some(CoreDecl::Value(self.lower_value_decl(decl))),
             })
             .collect();
@@ -367,9 +367,12 @@ impl ModuleLowerer<'_, '_> {
                 }
                 return current;
             }
-            Expr::Within { span, .. } => {
-                self.unsupported(*span, "unsupported scoped-effect runtime");
-                CoreExprKind::Unit
+            Expr::Within { scope, body, .. } => {
+                let scope = self.lower_scope_name(scope, locals);
+                self.default_scopes.push(scope);
+                let body = self.lower_block(body, &mut locals.clone(), tail);
+                self.default_scopes.pop();
+                return body;
             }
             Expr::Handle {
                 action,
@@ -412,7 +415,9 @@ impl ModuleLowerer<'_, '_> {
             .map(|arg| self.lower_expr(arg, locals, TailPosition::NonTail))
             .collect::<Vec<_>>();
         lowered_args.extend(trailing);
-        let kind = self.lower_call_kind(callee, lowered_args, locals);
+        let callee_ty = self.type_for_expr(callee, locals);
+        self.insert_elided_scope_arg(&callee_ty, &mut lowered_args);
+        let kind = self.lower_call_kind(callee, callee_ty, lowered_args, locals);
         CoreExpr {
             ty: self.type_at(span),
             span,
@@ -439,7 +444,10 @@ impl ModuleLowerer<'_, '_> {
                 self.lower_call_expr(callee, args, trailing, span, locals, tail)
             }
             other => {
-                let kind = self.lower_call_kind(other, trailing, locals);
+                let callee_ty = self.type_for_expr(other, locals);
+                let mut args = trailing;
+                self.insert_elided_scope_arg(&callee_ty, &mut args);
+                let kind = self.lower_call_kind(other, callee_ty, args, locals);
                 CoreExpr {
                     ty: self.type_at(span),
                     span,
@@ -453,19 +461,83 @@ impl ModuleLowerer<'_, '_> {
     fn lower_call_kind(
         &mut self,
         callee: &Expr,
+        callee_ty: Type,
         args: Vec<CoreExpr>,
         locals: &mut BTreeMap<String, Local>,
     ) -> CoreExprKind {
         if let Some(constructor) = self.constructor_reference(callee.span()) {
             CoreExprKind::Variant { constructor, args }
         } else if let Some(operation) = self.operation_reference(callee.span()) {
-            CoreExprKind::Operation { operation, args }
+            if let Some(info) = self.operation_info(&operation).filter(|info| info.scoped) {
+                let expected_params = match &callee_ty {
+                    Type::Function(params, _) => params.len(),
+                    _ => args.len(),
+                };
+                let (scope, args) = if args.len() + 1 == expected_params {
+                    if let Some(scope) = self.default_scopes.last() {
+                        (scope.clone(), args)
+                    } else if let Some((scope, args)) = args.split_first() {
+                        (scope.clone(), args.to_vec())
+                    } else {
+                        self.unsupported_effect_runtime(
+                            callee.span(),
+                            "scoped operation calls need an explicit or `within` scope",
+                        );
+                        return CoreExprKind::Operation {
+                            operation,
+                            scoped: None,
+                            args,
+                        };
+                    }
+                } else if let Some((scope, args)) = args.split_first() {
+                    (scope.clone(), args.to_vec())
+                } else if let Some(scope) = self.default_scopes.last() {
+                    (scope.clone(), args)
+                } else {
+                    self.unsupported_effect_runtime(
+                        callee.span(),
+                        "scoped operation calls need an explicit or `within` scope",
+                    );
+                    return CoreExprKind::Operation {
+                        operation,
+                        scoped: None,
+                        args,
+                    };
+                };
+                CoreExprKind::Operation {
+                    operation,
+                    scoped: Some(CoreScopedRequest {
+                        family: info.family,
+                        scope: Box::new(scope),
+                    }),
+                    args,
+                }
+            } else {
+                CoreExprKind::Operation {
+                    operation,
+                    scoped: None,
+                    args,
+                }
+            }
         } else {
             CoreExprKind::Call {
                 callee: Box::new(self.lower_expr(callee, locals, TailPosition::NonTail)),
                 args,
             }
         }
+    }
+
+    fn insert_elided_scope_arg(&self, callee_ty: &Type, args: &mut Vec<CoreExpr>) {
+        let Type::Function(params, _) = callee_ty else {
+            return;
+        };
+        if params.len() != args.len() + 1 {
+            return;
+        }
+        let Some(scope) = self.default_scopes.last() else {
+            return;
+        };
+        args.insert(0, scope.clone());
     }
 
     fn lower_handle_expr(
@@ -476,7 +548,9 @@ impl ModuleLowerer<'_, '_> {
         locals: &BTreeMap<String, Local>,
         tail: TailPosition,
     ) -> CoreExprKind {
+        let handled_action_ty = self.handler_action_type(action, locals);
         let action = Box::new(self.lower_expr(action, &mut locals.clone(), TailPosition::NonTail));
+        let action_ty = action.ty.clone();
         let clauses = clauses
             .iter()
             .map(|clause| {
@@ -498,6 +572,11 @@ impl ModuleLowerer<'_, '_> {
                     operation: self
                         .operation_reference(clause.operation.span)
                         .unwrap_or_else(|| self.global(&clause.operation.text)),
+                    scoped: self.lower_scoped_handler(
+                        clause.operation.span,
+                        handled_action_ty.as_ref().unwrap_or(&action_ty),
+                        locals,
+                    ),
                     params,
                     resume,
                     body: Box::new(body),
@@ -544,6 +623,39 @@ impl ModuleLowerer<'_, '_> {
             };
         }
         self.lower_resolved_global_expr(name.span)
+    }
+
+    fn lower_scope_name(&mut self, name: &Name, locals: &BTreeMap<String, Local>) -> CoreExpr {
+        let ty = locals
+            .get(&name.text)
+            .map(|local| local.ty.clone())
+            .unwrap_or_else(|| self.type_at(name.span));
+        let kind = if locals.contains_key(&name.text) {
+            CoreExprKind::Local(CoreLocalName(name.text.clone()))
+        } else if let Some(reference) = self.reference_at(name.span) {
+            CoreExprKind::Global(CoreGlobalName {
+                module: reference.target.module.clone(),
+                name: reference.target.name.clone(),
+            })
+        } else {
+            CoreExprKind::Global(self.global(&name.text))
+        };
+        CoreExpr {
+            ty,
+            span: name.span,
+            tail: TailPosition::NonTail,
+            kind,
+        }
+    }
+
+    fn handler_action_type(&self, action: &Expr, locals: &BTreeMap<String, Local>) -> Option<Type> {
+        let Expr::Call { callee, .. } = action else {
+            return None;
+        };
+        match self.type_for_expr(callee, locals) {
+            Type::Function(_, result) => Some(*result),
+            _ => None,
+        }
     }
 
     fn lower_resolved_global_expr(&mut self, span: Span) -> CoreExprKind {
@@ -797,6 +909,116 @@ impl ModuleLowerer<'_, '_> {
         }
     }
 
+    fn operation_info(&self, operation: &CoreGlobalName) -> Option<OperationInfo> {
+        let module = self
+            .parent
+            .session
+            .analysis
+            .graph
+            .modules
+            .get(&operation.module)?;
+        for item in &module.parsed.module.items {
+            let Item::Effect(decl) = item else {
+                continue;
+            };
+            if decl
+                .operations
+                .iter()
+                .any(|candidate| candidate.name.text == operation.name)
+            {
+                return Some(OperationInfo {
+                    family: CoreGlobalName {
+                        module: module.name.clone(),
+                        name: decl.name.text.clone(),
+                    },
+                    scoped: decl.scoped,
+                });
+            }
+        }
+        None
+    }
+
+    fn lower_scoped_handler(
+        &mut self,
+        operation_span: Span,
+        action_ty: &Type,
+        locals: &BTreeMap<String, Local>,
+    ) -> Option<CoreScopedRequest> {
+        let operation = self.operation_reference(operation_span)?;
+        let info = self.operation_info(&operation)?;
+        if !info.scoped {
+            return None;
+        }
+        let scope_ty = first_scoped_effect_scope(action_ty, &info.family.name)?;
+        let scope = self.scope_expr_for_type(&scope_ty, operation_span, locals)?;
+        Some(CoreScopedRequest {
+            family: info.family,
+            scope: Box::new(scope),
+        })
+    }
+
+    fn scope_expr_for_type(
+        &mut self,
+        scope_ty: &Type,
+        span: Span,
+        locals: &BTreeMap<String, Local>,
+    ) -> Option<CoreExpr> {
+        for (name, local) in locals {
+            if &local.ty == scope_ty {
+                return Some(CoreExpr {
+                    ty: local.ty.clone(),
+                    span,
+                    tail: TailPosition::NonTail,
+                    kind: CoreExprKind::Local(CoreLocalName(name.clone())),
+                });
+            }
+        }
+        if let Type::Named { name, args } = scope_ty
+            && args.is_empty()
+            && let Some(scope) = self.resolve_scope_global(name)
+        {
+            return Some(CoreExpr {
+                ty: scope_ty.clone(),
+                span,
+                tail: TailPosition::NonTail,
+                kind: CoreExprKind::Global(scope),
+            });
+        }
+        self.unsupported_effect_runtime(
+            span,
+            "scoped handler scope could not be recovered for JavaScript emission",
+        );
+        None
+    }
+
+    fn resolve_scope_global(&self, name: &str) -> Option<CoreGlobalName> {
+        if let Some(symbol) = self
+            .module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == SymbolKind::Scope && symbol.name == name)
+        {
+            return Some(CoreGlobalName {
+                module: symbol.module.clone(),
+                name: symbol.name.clone(),
+            });
+        }
+        for import in &self.module.imports {
+            let Some(module) = self.parent.session.analysis.graph.modules.get(import) else {
+                continue;
+            };
+            if let Some(symbol) = module.symbols.iter().find(|symbol| {
+                symbol.kind == SymbolKind::Scope && symbol.exported && symbol.name == name
+            }) {
+                return Some(CoreGlobalName {
+                    module: symbol.module.clone(),
+                    name: symbol.name.clone(),
+                });
+            }
+        }
+        None
+    }
+
     fn global(&self, name: &str) -> CoreGlobalName {
         CoreGlobalName {
             module: self.module.name.clone(),
@@ -806,7 +1028,16 @@ impl ModuleLowerer<'_, '_> {
 
     fn validate_effect_runtime(&mut self, expr: &CoreExpr) {
         match &expr.kind {
-            CoreExprKind::Operation { args, .. } => {
+            CoreExprKind::Operation { scoped, args, .. } => {
+                if let Some(scoped) = scoped {
+                    if core_needs_effect_runtime(&scoped.scope) {
+                        self.unsupported_effect_runtime(
+                            scoped.scope.span,
+                            "effectful scoped operation scopes are not executable yet",
+                        );
+                    }
+                    self.validate_effect_runtime(&scoped.scope);
+                }
                 for arg in args {
                     if core_needs_effect_runtime(arg) {
                         self.unsupported_effect_runtime(
@@ -824,6 +1055,15 @@ impl ModuleLowerer<'_, '_> {
             } => {
                 self.validate_effect_runtime(action);
                 for clause in clauses {
+                    if let Some(scoped) = &clause.scoped {
+                        if core_needs_effect_runtime(&scoped.scope) {
+                            self.unsupported_effect_runtime(
+                                scoped.scope.span,
+                                "effectful scoped handler scopes are not executable yet",
+                            );
+                        }
+                        self.validate_effect_runtime(&scoped.scope);
+                    }
                     self.validate_effect_runtime(&clause.body);
                 }
                 if let Some(return_clause) = return_clause {
@@ -1025,6 +1265,18 @@ fn core_needs_effect_runtime(expr: &CoreExpr) -> bool {
     }
 }
 
+fn first_scoped_effect_scope(ty: &Type, family: &str) -> Option<Type> {
+    let Type::Effectful { effects, .. } = ty else {
+        return None;
+    };
+    effects.effects.iter().find_map(|effect| {
+        let Type::Named { name, args } = effect else {
+            return None;
+        };
+        (name == family).then(|| args.first().cloned()).flatten()
+    })
+}
+
 fn core_returns_effectful(ty: &Type) -> bool {
     matches!(ty, Type::Function(_, result) if matches!(result.as_ref(), Type::Effectful { .. }))
 }
@@ -1216,7 +1468,7 @@ bad() : List Int with <Raise>
     }
 
     #[test]
-    fn rejects_accepted_but_unsupported_scoped_effect_runtime() {
+    fn lowers_scoped_effect_requests_with_scope_metadata() {
         let analysis = analyze_workspace(
             &PathBuf::from("examples/phase-4"),
             vec![source(
@@ -1237,18 +1489,12 @@ increment() : Int with <State Counter Int>
         );
         let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
 
-        let diagnostics = lower_to_core(&session).expect_err("compiler diagnostics");
+        let program = lower_to_core(&session).expect("core program");
+        let tree = program.debug_tree();
 
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("Phase 2.5 compiler unsupported: scoped effect declarations")
-        }));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("Phase 2.5 compiler unsupported: scope declarations")
-        }));
+        assert!(tree.contains("scope state.Counter"));
+        assert!(tree.contains("expr operation"));
+        assert!(tree.contains("expr global"));
     }
 
     #[test]

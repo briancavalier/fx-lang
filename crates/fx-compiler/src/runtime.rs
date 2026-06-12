@@ -65,6 +65,20 @@ const __fx = Object.freeze({
   perform(operation, payload) {
     return __fx.effect((handler, continuation) => handler({
       operation,
+      family: undefined,
+      scope: undefined,
+      payload,
+      resume(value) {
+        return continuation(value);
+      },
+    }));
+  },
+
+  performScoped(operation, family, scope, payload) {
+    return __fx.effect((handler, continuation) => handler({
+      operation,
+      family,
+      scope,
       payload,
       resume(value) {
         return continuation(value);
@@ -90,7 +104,12 @@ const __fx = Object.freeze({
   handle(action, spec) {
     return __fx.effect((outerHandler, continuation) => {
       const localHandler = (request) => {
-        const clause = spec.operations[request.operation];
+        const entry = spec.operations[request.operation];
+        const clause = typeof entry === "function"
+          ? entry
+          : entry !== undefined && entry.family === request.family && entry.scope === request.scope
+            ? entry.handler
+            : undefined;
         if (clause === undefined) {
           return outerHandler(request);
         }
@@ -107,7 +126,8 @@ const __fx = Object.freeze({
     return __fx.runEffect(
       computation,
       (request) => {
-        throw new Error(`Unhandled fx operation ${request.operation}`);
+        const scope = request.scope && request.scope.key ? ` at ${request.scope.key}` : "";
+        throw new Error(`Unhandled fx operation ${request.operation}${scope}`);
       },
       (value) => value
     );
@@ -239,6 +259,53 @@ console.log(__fx.run(program));
         );
 
         assert_eq!(output, "11");
+    }
+
+    #[test]
+    fn runtime_matches_scoped_requests_by_family_and_scope() {
+        let output = run_node(
+            r#"
+const counter = Object.freeze({ __fx_scope: true, key: "main.Counter" });
+const other = Object.freeze({ __fx_scope: true, key: "main.OtherCounter" });
+const handled = __fx.handle(
+  __fx.performScoped("main.get", "main.State", counter, []),
+  {
+    operations: {
+      "main.get": {
+        family: "main.State",
+        scope: counter,
+        handler: (resume) => resume(42),
+      },
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+const unhandled = __fx.handle(
+  __fx.performScoped("main.get", "main.State", other, []),
+  {
+    operations: {
+      "main.get": {
+        family: "main.State",
+        scope: counter,
+        handler: (resume) => resume(0),
+      },
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+try {
+  __fx.run(unhandled);
+} catch (error) {
+  console.log(`${__fx.run(handled)} ${error.message}`);
+}
+"#,
+        );
+
+        assert_eq!(output, "42 Unhandled fx operation main.get at main.OtherCounter");
     }
 
     #[test]
