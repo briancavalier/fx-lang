@@ -539,6 +539,132 @@ export main() : Int
     assert_eq!(output, "42");
 }
 
+#[test]
+fn contextual_function_executes_with_given_provider() {
+    let output = compile_and_run_main(
+        "contextual_function_given_provider",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ " " ++ message
+
+export main() : Text
+  given { clock = { now: "10:00" } }
+    stamp("started")
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "10:00 started");
+}
+
+#[test]
+fn context_polymorphic_with_clock_executes() {
+    let output = compile_and_run_main(
+        "context_polymorphic_with_clock",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"type Clock = {
+  now: Text
+}
+
+with-clock(clock: Clock, action: () -> a given { clock: Clock, ...c }) : a given { ...c }
+  given { clock = clock }
+    action()
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ " " ++ message
+
+export main() : Text
+  with with-clock({ now: "10:00" })
+    stamp("started")
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "10:00 started");
+}
+
+#[test]
+fn handler_clause_body_uses_contextual_value() {
+    let output = compile_and_run_main(
+        "handler_clause_contextual_value",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"type Clock = {
+  now: Text
+}
+
+effect Emit
+  emit(value: Text) : Unit
+
+collect(action: () -> Unit with <Emit> given { clock: Clock }) : Text given { clock: Clock }
+  handle action()
+    emit(value, resume) ->
+      resume(unit) ++ clock.now ++ ":" ++ value
+
+    return(_value) ->
+      ""
+
+export main() : Text
+  given { clock = { now: "10:00" } }
+    with collect()
+      emit("event")
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "10:00:event");
+}
+
+#[test]
+fn resumed_continuations_share_operation_site_context() {
+    let output = compile_and_run_main(
+        "resumed_continuations_share_context",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"type Clock = {
+  now: Text
+}
+
+effect Choose
+  choose(left: Text, right: Text) : Text
+
+choose-both(action: () -> Text with <Choose> given { clock: Clock }) : Text given { clock: Clock }
+  handle action()
+    choose(left, right, resume) ->
+      resume(left) ++ "/" ++ resume(right)
+
+    return(value) ->
+      value
+
+export main() : Text
+  given { clock = { now: "10:00" } }
+    with choose-both()
+      clock.now ++ choose("", "!")
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "10:00/10:00!");
+}
+
 fn compile_and_run_main(
     prefix: &str,
     root: &str,

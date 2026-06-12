@@ -62,11 +62,11 @@ impl Parser {
             Some(Item::Effect(self.effect_decl(export)))
         } else if self.at_keyword(Keyword::Scope) {
             Some(Item::Scope(self.scope_decl(export)))
-        } else if self.is_later_phase_keyword() {
+        } else if self.at_keyword(Keyword::Given) {
             let span = self.bump().span;
             self.diagnostics.push(Diagnostic::new(
                 span,
-                "this syntax belongs to a later phase and is not supported yet",
+                "module-level contextual exports are not supported in Phase 5",
             ));
             None
         } else if matches!(self.peek().kind, TokenKind::Ident(_)) {
@@ -335,12 +335,21 @@ impl Parser {
     fn expr(&mut self) -> Expr {
         if self.starts_lambda_expr() {
             self.lambda_expr()
+        } else if self.at_keyword(Keyword::Given) {
+            self.given_expr(self.peek().span.start)
         } else if self.at_keyword(Keyword::With) {
             self.with_expr()
         } else if self.at_keyword(Keyword::Within) {
             self.within_expr()
         } else {
             let expr = self.binary_expr(0);
+            if self.at_keyword(Keyword::Given) {
+                self.error_here("final given arguments are not supported in Phase 5");
+                self.bump();
+                if self.at(TokenKind::LBrace) {
+                    self.given_fields();
+                }
+            }
             if self.at_keyword(Keyword::With) {
                 self.error_here("postfix `with` is not supported; use prefix `with target`");
                 self.bump();
@@ -490,6 +499,41 @@ impl Parser {
             body,
             span,
         }
+    }
+
+    fn given_expr(&mut self, start: usize) -> Expr {
+        self.expect_keyword(Keyword::Given, "expected `given`");
+        if self.at_ident_text("each") {
+            self.error_here("given each is not supported in Phase 5");
+            self.bump();
+        }
+        let fields = self.given_fields();
+        self.expect_newline("expected newline after `given` provider");
+        self.expect(TokenKind::Indent, "expected indented `given` body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of `given` body");
+        let span = Span::new(start, body.span.end);
+        Expr::Given { fields, body, span }
+    }
+
+    fn given_fields(&mut self) -> Vec<FieldExpr> {
+        self.expect(TokenKind::LBrace, "expected `{` after `given`");
+        let mut fields = Vec::new();
+        self.skip_delimited_ws();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let field_start = self.peek().span.start;
+            let name = self
+                .expect_ident("expected given field name")
+                .unwrap_or_else(|| error_name(field_start));
+            self.expect(TokenKind::Equal, "expected `=` after given field name");
+            let value = self.expr();
+            let span = name.span.join(value.span());
+            fields.push(FieldExpr { name, value, span });
+            self.eat(TokenKind::Comma);
+            self.skip_delimited_ws();
+        }
+        self.expect(TokenKind::RBrace, "expected `}` after given fields");
+        fields
     }
 
     fn within_expr(&mut self) -> Expr {
@@ -951,7 +995,23 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> TypeExpr {
-        self.effect_type()
+        self.context_type()
+    }
+
+    fn context_type(&mut self) -> TypeExpr {
+        let result = self.effect_type();
+        if !self.at_keyword(Keyword::Given) {
+            return result;
+        }
+        let start = result.span().start;
+        self.expect_keyword(Keyword::Given, "expected `given` before context row");
+        let context = self.context_row();
+        let span = Span::new(start, context.span.end);
+        TypeExpr::Context {
+            result: Box::new(result),
+            context,
+            span,
+        }
     }
 
     fn effect_type(&mut self) -> TypeExpr {
@@ -975,7 +1035,7 @@ impl Parser {
         if self.eat(TokenKind::Arrow).is_none() {
             return left;
         }
-        let result = self.effect_type();
+        let result = self.context_type();
         let start = left.span().start;
         let params = match left {
             TypeExpr::Tuple { elems, .. } => elems,
@@ -1030,6 +1090,61 @@ impl Parser {
         let start = self.expect(TokenKind::Spread, "expected `...`").start;
         let name = self
             .expect_ident("expected effect row variable name after `...`")
+            .unwrap_or_else(|| error_name(start));
+        RowTail {
+            span: Span::new(start, name.span.end),
+            name,
+        }
+    }
+
+    fn context_row(&mut self) -> ContextRow {
+        let start = self
+            .expect(TokenKind::LBrace, "expected `{` before context row")
+            .start;
+        let mut fields = Vec::new();
+        let mut tail = None;
+        self.skip_delimited_ws();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Spread) {
+                if tail.is_some() {
+                    self.error_here("duplicate context row spread");
+                    self.bump();
+                    self.expect_ident("expected context row variable name after `...`");
+                } else {
+                    tail = Some(self.context_row_tail());
+                }
+                self.eat(TokenKind::Comma);
+                self.skip_delimited_ws();
+                if !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    self.error_here("context row spread must appear last");
+                }
+                continue;
+            }
+            let field_start = self.peek().span.start;
+            let name = self
+                .expect_ident("expected context field name")
+                .unwrap_or_else(|| error_name(field_start));
+            self.expect(TokenKind::Colon, "expected `:` after context field name");
+            let value = self.type_expr();
+            let span = name.span.join(value.span());
+            fields.push(FieldType { name, value, span });
+            self.eat(TokenKind::Comma);
+            self.skip_delimited_ws();
+        }
+        let end = self
+            .expect(TokenKind::RBrace, "expected `}` after context row")
+            .end;
+        ContextRow {
+            fields,
+            tail,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn context_row_tail(&mut self) -> RowTail {
+        let start = self.expect(TokenKind::Spread, "expected `...`").start;
+        let name = self
+            .expect_ident("expected context row variable name after `...`")
             .unwrap_or_else(|| error_name(start));
         RowTail {
             span: Span::new(start, name.span.end),
@@ -1387,6 +1502,10 @@ impl Parser {
         self.peek().kind == kind
     }
 
+    fn at_ident_text(&self, text: &str) -> bool {
+        matches!(&self.peek().kind, TokenKind::Ident(found) if found == text)
+    }
+
     fn peek_is(&self, kind: TokenKind) -> bool {
         self.peek().kind == kind
     }
@@ -1406,10 +1525,6 @@ impl Parser {
     fn error_here(&mut self, message: &str) {
         self.diagnostics
             .push(Diagnostic::new(self.peek().span, message));
-    }
-
-    fn is_later_phase_keyword(&self) -> bool {
-        matches!(self.peek().kind, TokenKind::Keyword(Keyword::Given))
     }
 
     fn recover_item(&mut self) {

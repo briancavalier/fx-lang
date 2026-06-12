@@ -2021,6 +2021,244 @@ safe() : Int with <Raise>
 }
 
 #[test]
+fn checks_and_hovers_contextual_result_types() {
+    let source_text = r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+effect Console
+  print-line(message: Text) : Unit
+
+log-time(message: Text) : Unit with <Console, ...e> given { clock: Clock, ...c }
+  unit
+"#;
+    let result = check_single("context.fx", source_text);
+
+    assert_eq!(result.diagnostics, []);
+    let types = result.module_types.get("context").expect("module types");
+    assert_eq!(
+        types.get("stamp").map(ToString::to_string),
+        Some("(Text) -> Text given { clock: Clock }".to_string())
+    );
+    assert_eq!(
+        types.get("log-time").map(ToString::to_string),
+        Some("(Text) -> Unit with < Console, ...e > given { clock: Clock, ...c }".to_string())
+    );
+
+    let analysis = analyze_single("context.fx", source_text);
+    assert_eq!(
+        analysis
+            .hover_at("context", offset_of(source_text, "stamp"))
+            .expect("contextual function hover")
+            .contents,
+        "stamp : (Text) -> Text given { clock: Clock }"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("context", offset_of(source_text, "log-time"))
+            .expect("effectful contextual function hover")
+            .contents,
+        "log-time : (Text) -> Unit with < Console, ...e > given { clock: Clock, ...c }"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("context", offset_of(source_text, "clock.now"))
+            .expect("context value hover")
+            .contents,
+        "clock : Clock"
+    );
+    assert_eq!(
+        analysis
+            .hover_at("context", offset_of(source_text, "now ++"))
+            .expect("context field hover")
+            .contents,
+        "now : Text"
+    );
+    assert_eq!(
+        analysis
+            .definition_at("context", offset_of(source_text, "clock.now"))
+            .expect("context value definition")
+            .span,
+        analysis
+            .definition_at("context", offset_of(source_text, "clock: Clock"))
+            .expect("context field self definition")
+            .span
+    );
+}
+
+#[test]
+fn reports_duplicate_context_row_fields() {
+    let result = check_single(
+        "context.fx",
+        r#"bad() : Text given { clock: Text, clock: Text }
+  ""
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate context field `clock`")
+    }));
+}
+
+#[test]
+fn checks_open_context_rows_through_contextual_function_types() {
+    let result = check_single(
+        "context.fx",
+        r#"type Clock = {
+  now: Text
+}
+
+type Config = {
+  prefix: Text
+}
+
+accepts-open(f: () -> Text given { clock: Clock, ...c }) : Unit
+  unit
+
+needs-more() : Text given { clock: Clock, config: Config }
+  "ok"
+
+main() : Unit
+  accepts-open(needs-more)
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn checks_with_given_satisfies_contextual_calls() {
+    let source_text = r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+main() : Text
+  given { clock = { now: "10:00" } }
+    stamp(" started")
+
+read-provider() : Text
+  given { clock = { now: "11:00" } }
+    clock.now
+"#;
+    let result = check_single("context.fx", source_text);
+
+    assert_eq!(result.diagnostics, []);
+
+    let analysis = analyze_single("context.fx", source_text);
+    assert_eq!(
+        analysis
+            .hover_at("context", offset_of(source_text, "clock.now\n"))
+            .expect("provider body value hover")
+            .contents,
+        "clock : { now: Text }"
+    );
+    assert_eq!(
+        analysis
+            .definition_at("context", offset_of(source_text, "clock.now\n"))
+            .expect("provider body definition")
+            .span,
+        analysis
+            .definition_at(
+                "context",
+                offset_of(source_text, "clock = { now: \"11:00\" }")
+            )
+            .expect("provider self definition")
+            .span
+    );
+}
+
+#[test]
+fn declared_context_satisfies_nested_contextual_calls() {
+    let result = check_single(
+        "context.fx",
+        r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+wrap(message: Text) : Text given { clock: Clock }
+  stamp(message) ++ "!"
+
+choose(flag: Bool) : Text given { clock: Clock }
+  if flag then stamp("yes") else clock.now
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_missing_contextual_values_at_pure_boundaries() {
+    let result = check_single(
+        "context.fx",
+        r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  message
+
+main() : Text
+  stamp("started")
+"#,
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("missing contextual values { clock: Clock }")
+    }));
+}
+
+#[test]
+fn reports_context_provider_type_mismatches_and_duplicates() {
+    let mismatch = check_single(
+        "context.fx",
+        r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  message
+
+main() : Text
+  given { clock = 1 }
+    stamp("started")
+"#,
+    );
+
+    assert!(mismatch.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("context provider `clock` has type `Int`, expected `Clock`")
+    }));
+
+    let duplicate = check_single(
+        "context.fx",
+        r#"main() : Text
+  given { clock = "one", clock = "two" }
+    clock
+"#,
+    );
+
+    assert!(duplicate.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate context provider `clock`")
+    }));
+}
+
+#[test]
 fn hovers_parameter_local_pattern_and_field_types() {
     let source_text = r#"type Todo = {
   id: Int,

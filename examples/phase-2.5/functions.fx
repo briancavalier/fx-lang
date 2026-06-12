@@ -10,8 +10,7 @@ export make-suffix(suffix: Text) : Text -> Text
   value -> value ++ suffix
 
 export decorate(value: Text) : Text
-  suffix =
-    make-suffix("!")
+  suffix = make-suffix("!")
   apply-twice(suffix, value)
 
 export computed() : Text

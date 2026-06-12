@@ -601,7 +601,7 @@ Include:
 - open context rows such as `a given { clock: Clock, ...c }`;
 - functions with both effects and context, such as
   `a with <Console, ...e> given { clock: Clock, ...c }`;
-- scoped providers: `with given { clock = system-clock() } body`;
+- lexical providers: `given { clock = system-clock() } body`;
 - name-and-type contextual resolution;
 - contextual values visible by name inside the provider body;
 - named provider functions using trailing-action sugar;
@@ -643,7 +643,7 @@ timestamp(message: Text) : Text given { clock: Clock }
   std.instant.to-text(clock.now()) ++ " " ++ message
 
 main() : Unit with <Console>
-  with given { clock = system-clock() }
+  given { clock = system-clock() }
     print-line(timestamp("started"))
 ```
 

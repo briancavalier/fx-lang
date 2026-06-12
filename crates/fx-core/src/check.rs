@@ -35,6 +35,10 @@ pub enum Type {
         result: Box<Type>,
         effects: EffectRowType,
     },
+    Contextual {
+        result: Box<Type>,
+        context: ContextRowType,
+    },
     Function(Vec<Type>, Box<Type>),
     Unknown,
 }
@@ -50,6 +54,18 @@ pub struct RowType {
 pub struct EffectRowType {
     pub effects: Vec<Type>,
     pub tail: Option<RowTailType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRowType {
+    pub fields: Vec<ContextFieldType>,
+    pub tail: Option<RowTailType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextFieldType {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +131,7 @@ struct Substitution {
     types: BTreeMap<TypeVar, Type>,
     rows: BTreeMap<RowVar, RowType>,
     effects: BTreeMap<RowVar, EffectRowType>,
+    contexts: BTreeMap<RowVar, ContextRowType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +153,9 @@ enum CompatibilityError {
     },
     UnhandledEffects {
         effects: EffectRowType,
+    },
+    MissingContext {
+        context: ContextRowType,
     },
 }
 
@@ -177,6 +197,7 @@ pub fn check_workspace(graph: &ModuleGraph) -> CheckResult {
             symbol_tables: &symbol_tables,
             typed_spans: Vec::new(),
             default_scopes: Vec::new(),
+            context_providers: Vec::new(),
         };
         let checked = checker.check();
         let checked_diagnostics = checker.diagnostics;
@@ -216,6 +237,7 @@ struct ModuleChecker<'a> {
     symbol_tables: &'a SymbolTables,
     typed_spans: Vec<TypedSpan>,
     default_scopes: Vec<(Name, Type)>,
+    context_providers: Vec<BTreeMap<String, Type>>,
 }
 
 impl TypeVar {
@@ -336,6 +358,10 @@ impl EffectRowType {
 fn split_effectful(ty: Type) -> (Type, EffectRowType) {
     match ty {
         Type::Effectful { result, effects } => (*result, effects),
+        Type::Contextual { result, context } => {
+            let (result, effects) = split_effectful(*result);
+            (attach_context(result, context), effects)
+        }
         other => (other, EffectRowType::empty()),
     }
 }
@@ -344,6 +370,9 @@ fn attach_effects(result: Type, effects: EffectRowType) -> Type {
     if effects.is_empty() {
         result
     } else {
+        if let Type::Contextual { result, context } = result {
+            return attach_context(attach_effects(*result, effects), context);
+        }
         let (result, existing) = split_effectful(result);
         let mut effects = effects;
         effects.extend(existing);
@@ -351,6 +380,34 @@ fn attach_effects(result: Type, effects: EffectRowType) -> Type {
             result: Box::new(result),
             effects,
         }
+    }
+}
+
+fn attach_context(result: Type, context: ContextRowType) -> Type {
+    if context.is_empty() {
+        result
+    } else {
+        Type::Contextual {
+            result: Box::new(result),
+            context,
+        }
+    }
+}
+
+fn strip_context_fields(ty: Type, provided: &BTreeSet<String>) -> Type {
+    match ty {
+        Type::Contextual { result, context } => {
+            let context = ContextRowType {
+                fields: context
+                    .fields
+                    .into_iter()
+                    .filter(|field| !provided.contains(&field.name))
+                    .collect(),
+                tail: context.tail,
+            };
+            attach_context(*result, context)
+        }
+        other => other,
     }
 }
 
@@ -378,6 +435,7 @@ fn effect_row_performed_by_action(handled: &EffectRowType, action: &EffectRowTyp
 fn expected_result_type(expected: &Type) -> Type {
     match expected {
         Type::Effectful { result, .. } => result.as_ref().clone(),
+        Type::Contextual { result, .. } => expected_result_type(result),
         other => other.clone(),
     }
 }
@@ -410,6 +468,12 @@ impl RowType {
             RowEntry::Case { name, payload } if name == wanted => Some(payload.as_slice()),
             _ => None,
         })
+    }
+}
+
+impl ContextRowType {
+    fn is_empty(&self) -> bool {
+        self.fields.is_empty() && self.tail.is_none()
     }
 }
 
@@ -528,6 +592,14 @@ impl ModuleChecker<'_> {
                     self.check_effect_row_member(effect);
                 }
             }
+            TypeExpr::Context {
+                result, context, ..
+            } => {
+                self.check_effect_annotation_type(result);
+                for field in &context.fields {
+                    self.check_effect_annotation_type(&field.value);
+                }
+            }
             TypeExpr::Record { fields, .. } => {
                 for field in fields {
                     self.check_effect_annotation_type(&field.value);
@@ -610,6 +682,7 @@ impl ModuleChecker<'_> {
         let expected = lowerer.lower_type(&decl.annotation);
         self.diagnostics.extend(lowerer.diagnostics);
 
+        let context_bindings = self.add_context_bindings(&decl.annotation, &expected, &mut env);
         for (param, ty) in decl.params.iter().zip(params) {
             self.add_typed_span(
                 param.name.span,
@@ -619,7 +692,50 @@ impl ModuleChecker<'_> {
             );
             env.insert(param.name.text.clone(), ty);
         }
-        self.check_block(&decl.body, &env, &expected);
+        let provided_context = context_bindings
+            .as_ref()
+            .map(|bindings| bindings.keys().cloned().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        let body_expected = strip_context_fields(expected.clone(), &provided_context);
+        let has_context_bindings = context_bindings.is_some();
+        if let Some(bindings) = context_bindings {
+            self.context_providers.push(bindings);
+        }
+        self.check_block(&decl.body, &env, &body_expected);
+        if has_context_bindings {
+            self.context_providers.pop();
+        }
+    }
+
+    fn add_context_bindings(
+        &mut self,
+        annotation: &TypeExpr,
+        expected: &Type,
+        env: &mut BTreeMap<String, Type>,
+    ) -> Option<BTreeMap<String, Type>> {
+        let (
+            TypeExpr::Context {
+                context: source_context,
+                ..
+            },
+            Type::Contextual { context, .. },
+        ) = (annotation, expected)
+        else {
+            return None;
+        };
+
+        let mut providers = BTreeMap::new();
+        for (source_field, field) in source_context.fields.iter().zip(&context.fields) {
+            self.add_typed_span(
+                source_field.name.span,
+                TypedSpanKind::Parameter,
+                &source_field.name.text,
+                &field.ty,
+            );
+            env.insert(source_field.name.text.clone(), field.ty.clone());
+            providers.insert(source_field.name.text.clone(), field.ty.clone());
+        }
+        Some(providers)
     }
 
     fn check_block(
@@ -718,6 +834,7 @@ impl ModuleChecker<'_> {
                 attach_effects(expected_result_type(expected), effects)
             }
             Expr::With { .. } => self.check_inferred_expr(expr, env, expected),
+            Expr::Given { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Within { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Handle { .. } => self.check_handle_expr(expr, env, expected),
             _ => self.check_inferred_expr(expr, env, expected),
@@ -953,6 +1070,7 @@ impl ModuleChecker<'_> {
                 body,
                 span,
             } => self.infer_with_expr(targets, body, *span, env),
+            Expr::Given { fields, body, span } => self.infer_given_expr(fields, body, *span, env),
             Expr::Within { scope, body, .. } => {
                 let scope_ty = self.resolve_expr_name(&scope.text, scope.span, env, NameUse::Value);
                 self.add_typed_span(scope.span, TypedSpanKind::Scope, &scope.text, &scope_ty);
@@ -1211,6 +1329,51 @@ impl ModuleChecker<'_> {
         result
     }
 
+    fn infer_given_expr(
+        &mut self,
+        fields: &[FieldExpr],
+        body: &Block,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let mut provider_env = BTreeMap::new();
+        let mut body_env = env.clone();
+        let mut seen = BTreeSet::new();
+        let mut effects = EffectRowType::empty();
+
+        for field in fields {
+            if !seen.insert(field.name.text.clone()) {
+                self.diagnostics.push(Diagnostic::new(
+                    field.name.span,
+                    format!("duplicate context provider `{}`", field.name.text),
+                ));
+            }
+            let ty = self.infer_expr(&field.value, env);
+            let (ty, field_effects) = split_effectful(ty);
+            effects.extend(field_effects);
+            self.add_typed_span(
+                field.name.span,
+                TypedSpanKind::Parameter,
+                &field.name.text,
+                &ty,
+            );
+            provider_env.insert(field.name.text.clone(), ty.clone());
+            body_env.insert(field.name.text.clone(), ty);
+        }
+
+        self.context_providers.push(provider_env);
+        let body_ty = self.infer_block(body, &body_env);
+        self.context_providers.pop();
+        let (body_ty, body_effects) = split_effectful(body_ty);
+        effects.extend(body_effects);
+        let found = attach_effects(body_ty, effects);
+        if matches!(found, Type::Unknown) {
+            self.diagnostics
+                .push(Diagnostic::new(span, "invalid context provider expression"));
+        }
+        found
+    }
+
     fn infer_block(&mut self, block: &Block, env: &BTreeMap<String, Type>) -> Type {
         let mut env = env.clone();
         let mut effects = EffectRowType::empty();
@@ -1358,7 +1521,8 @@ impl ModuleChecker<'_> {
                     effects.extend(arg_effects);
                     unify_vars(expected, &found, &mut subst);
                 }
-                attach_effects(substitute(&result, &subst), effects)
+                let result = self.satisfy_contextual_result(substitute(&result, &subst), span);
+                attach_effects(result, effects)
             }
             Type::Unknown => Type::Unknown,
             other => {
@@ -1369,6 +1533,48 @@ impl ModuleChecker<'_> {
                 Type::Unknown
             }
         }
+    }
+
+    fn satisfy_contextual_result(&mut self, ty: Type, span: Span) -> Type {
+        match ty {
+            Type::Contextual { result, context } => {
+                let remaining = self.satisfy_context_row(context, span);
+                attach_context(*result, remaining)
+            }
+            other => other,
+        }
+    }
+
+    fn satisfy_context_row(&mut self, context: ContextRowType, span: Span) -> ContextRowType {
+        let mut remaining = ContextRowType {
+            fields: Vec::new(),
+            tail: context.tail,
+        };
+        for field in context.fields {
+            let Some(provider_ty) = self.context_provider(&field.name).cloned() else {
+                remaining.fields.push(field);
+                continue;
+            };
+            if !self.compatible(&provider_ty, &field.ty) {
+                let message = self.compatibility_message(
+                    &provider_ty,
+                    &field.ty,
+                    format!(
+                        "context provider `{}` has type `{provider_ty}`, expected `{}`",
+                        field.name, field.ty
+                    ),
+                );
+                self.diagnostics.push(Diagnostic::new(span, message));
+            }
+        }
+        remaining
+    }
+
+    fn context_provider(&self, name: &str) -> Option<&Type> {
+        self.context_providers
+            .iter()
+            .rev()
+            .find_map(|providers| providers.get(name))
     }
 
     fn infer_binary_expr(
@@ -1701,6 +1907,7 @@ impl ModuleChecker<'_> {
                         types,
                         rows: BTreeMap::new(),
                         effects: BTreeMap::new(),
+                        contexts: BTreeMap::new(),
                     };
                     substitute(&def.body, &subst)
                 })
@@ -1733,6 +1940,9 @@ impl ModuleChecker<'_> {
             }
             Err(CompatibilityError::UnhandledEffects { effects }) => {
                 format!("unhandled effects {effects}")
+            }
+            Err(CompatibilityError::MissingContext { context }) => {
+                format!("missing contextual values {context}")
             }
             Err(CompatibilityError::Mismatch) | Ok(()) => fallback,
         }
@@ -2273,6 +2483,19 @@ fn collect_annotation_vars(
                     .or_insert(tail.name.span);
             }
         }
+        TypeExpr::Context {
+            result, context, ..
+        } => {
+            collect_annotation_vars(result, type_spans, row_spans);
+            for field in &context.fields {
+                collect_annotation_vars(&field.value, type_spans, row_spans);
+            }
+            if let Some(tail) = &context.tail {
+                row_spans
+                    .entry(tail.name.text.clone())
+                    .or_insert(tail.name.span);
+            }
+        }
         TypeExpr::Record { fields, tail, .. } => {
             for field in fields {
                 collect_annotation_vars(&field.value, type_spans, row_spans);
@@ -2379,6 +2602,12 @@ impl TypeLowerer {
                 result: Box::new(self.lower_type(result)),
                 effects: self.lower_effect_row(effects),
             },
+            TypeExpr::Context {
+                result, context, ..
+            } => Type::Contextual {
+                result: Box::new(self.lower_type(result)),
+                context: self.lower_context_row(context),
+            },
             TypeExpr::Record { fields, tail, .. } => self.lower_record_type(fields, tail),
             TypeExpr::Variant { cases, tail, .. } => self.lower_variant_type(cases, tail),
             TypeExpr::Tuple { .. } | TypeExpr::Error { .. } => Type::Unknown,
@@ -2400,6 +2629,35 @@ impl TypeLowerer {
             )
         });
         EffectRowType { effects, tail }
+    }
+
+    fn lower_context_row(&mut self, row: &ContextRow) -> ContextRowType {
+        let mut seen = BTreeSet::new();
+        let fields = row
+            .fields
+            .iter()
+            .map(|field| {
+                if !seen.insert(field.name.text.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        field.name.span,
+                        format!("duplicate context field `{}`", field.name.text),
+                    ));
+                }
+                ContextFieldType {
+                    name: field.name.text.clone(),
+                    ty: self.lower_type(&field.value),
+                }
+            })
+            .collect();
+        let tail = row.tail.as_ref().map(|tail| {
+            RowTailType::Var(
+                self.scope
+                    .as_ref()
+                    .map(|scope| scope.row_var(tail))
+                    .unwrap_or_else(|| RowVar::unscoped(tail.name.text.clone())),
+            )
+        });
+        ContextRowType { fields, tail }
     }
 
     fn lower_record_type(&mut self, fields: &[FieldType], tail: &Option<RowTail>) -> Type {
@@ -2506,6 +2764,7 @@ fn effect_row_member_parts(effect: &TypeExpr) -> Option<(String, usize, Span)> {
         TypeExpr::Var(_)
         | TypeExpr::Function { .. }
         | TypeExpr::Effect { .. }
+        | TypeExpr::Context { .. }
         | TypeExpr::Record { .. }
         | TypeExpr::Variant { .. }
         | TypeExpr::Tuple { .. }
@@ -2578,6 +2837,20 @@ fn unify_compatible(
             unify_compatible(found_result, expected_result, subst)?;
             unify_effect_rows(found_effects, expected_effects, subst)
         }
+        (
+            Type::Contextual {
+                result: found_result,
+                context: found_context,
+            },
+            Type::Contextual {
+                result: expected_result,
+                context: expected_context,
+            },
+        ) => {
+            unify_compatible(found_result, expected_result, subst)?;
+            unify_context_rows(found_context, expected_context, subst)
+        }
+        (found, Type::Contextual { result, .. }) => unify_compatible(found, result, subst),
         (Type::Effectful { result, effects }, expected) => {
             unify_compatible(result, expected, subst)?;
             if effects.is_empty() {
@@ -2589,6 +2862,16 @@ fn unify_compatible(
             }
         }
         (found, Type::Effectful { result, effects: _ }) => unify_compatible(found, result, subst),
+        (Type::Contextual { result, context }, expected) => {
+            unify_compatible(result, expected, subst)?;
+            if context.is_empty() {
+                Ok(())
+            } else {
+                Err(CompatibilityError::MissingContext {
+                    context: context.clone(),
+                })
+            }
+        }
         (Type::Function(a_params, a_result), Type::Function(b_params, b_result))
             if a_params.len() == b_params.len() =>
         {
@@ -2650,6 +2933,57 @@ fn unify_effect_rows(
     }
 }
 
+fn unify_context_rows(
+    found: &ContextRowType,
+    expected: &ContextRowType,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    let mut remaining = found.fields.clone();
+    for expected_field in &expected.fields {
+        let Some(index) = remaining.iter().position(|found_field| {
+            found_field.name == expected_field.name
+                && unify_compatible(&found_field.ty, &expected_field.ty, subst).is_ok()
+        }) else {
+            return Err(CompatibilityError::MissingField {
+                name: expected_field.name.clone(),
+            });
+        };
+        remaining.remove(index);
+    }
+
+    if let Some(RowTailType::Var(name)) = &expected.tail {
+        bind_context_tail(
+            name,
+            ContextRowType {
+                fields: remaining,
+                tail: found.tail.clone(),
+            },
+            subst,
+        )
+    } else if remaining.is_empty() && found.tail.is_none() {
+        Ok(())
+    } else {
+        Err(CompatibilityError::Mismatch)
+    }
+}
+
+fn bind_context_tail(
+    name: &RowVar,
+    row: ContextRowType,
+    subst: &mut Substitution,
+) -> Result<(), CompatibilityError> {
+    if row.fields.is_empty() && matches!(&row.tail, Some(RowTailType::Var(tail)) if tail == name) {
+        return Ok(());
+    }
+    if let Some(existing) = subst.contexts.get(name) {
+        let mut nested = subst.clone();
+        unify_context_rows(&row, existing, &mut nested)?;
+    } else {
+        subst.contexts.insert(name.clone(), row);
+    }
+    Ok(())
+}
+
 fn unify_rows(
     found: &RowType,
     expected: &RowType,
@@ -2694,7 +3028,8 @@ fn unify_record_rows(
             CompatibilityError::RowKind { .. }
             | CompatibilityError::MissingField { .. }
             | CompatibilityError::MissingCase { .. }
-            | CompatibilityError::UnhandledEffects { .. } => error,
+            | CompatibilityError::UnhandledEffects { .. }
+            | CompatibilityError::MissingContext { .. } => error,
             CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                 CompatibilityError::TypeMismatch {
                     expected: Box::new(ty.clone()),
@@ -2746,7 +3081,8 @@ fn unify_variant_rows(
                 CompatibilityError::RowKind { .. }
                 | CompatibilityError::MissingField { .. }
                 | CompatibilityError::MissingCase { .. }
-                | CompatibilityError::UnhandledEffects { .. } => error,
+                | CompatibilityError::UnhandledEffects { .. }
+                | CompatibilityError::MissingContext { .. } => error,
                 CompatibilityError::Mismatch | CompatibilityError::TypeMismatch { .. } => {
                     CompatibilityError::TypeMismatch {
                         expected: Box::new(expected_ty.clone()),
@@ -2838,6 +3174,7 @@ fn type_expr_display(ty: &TypeExpr) -> String {
         }
         TypeExpr::Function { .. }
         | TypeExpr::Effect { .. }
+        | TypeExpr::Context { .. }
         | TypeExpr::Record { .. }
         | TypeExpr::Variant { .. }
         | TypeExpr::Tuple { .. }
@@ -2889,6 +3226,18 @@ fn unify_vars(pattern: &Type, found: &Type, subst: &mut Substitution) {
                 unify_vars(result, found, subst);
             }
         }
+        Type::Contextual { result, context } => {
+            if let Type::Contextual {
+                result: found_result,
+                context: found_context,
+            } = found
+            {
+                unify_vars(result, found_result, subst);
+                let _ = unify_context_rows(found_context, context, subst);
+            } else {
+                unify_vars(result, found, subst);
+            }
+        }
         Type::Function(params, result) => {
             if let Type::Function(found_params, found_result) = found {
                 for (param, found_param) in params.iter().zip(found_params) {
@@ -2913,6 +3262,10 @@ fn substitute(ty: &Type, subst: &Substitution) -> Type {
         Type::Effectful { result, effects } => Type::Effectful {
             result: Box::new(substitute(result, subst)),
             effects: substitute_effect_row(effects, subst),
+        },
+        Type::Contextual { result, context } => Type::Contextual {
+            result: Box::new(substitute(result, subst)),
+            context: substitute_context_row(context, subst),
         },
         Type::Function(params, result) => Type::Function(
             params
@@ -2946,6 +3299,32 @@ fn substitute_effect_row(row: &EffectRowType, subst: &Substitution) -> EffectRow
     };
 
     EffectRowType { effects, tail }
+}
+
+fn substitute_context_row(row: &ContextRowType, subst: &Substitution) -> ContextRowType {
+    let mut fields = row
+        .fields
+        .iter()
+        .map(|field| ContextFieldType {
+            name: field.name.clone(),
+            ty: substitute(&field.ty, subst),
+        })
+        .collect::<Vec<_>>();
+
+    let tail = match &row.tail {
+        Some(RowTailType::Var(name)) => {
+            if let Some(bound) = subst.contexts.get(name) {
+                let bound = substitute_context_row(bound, subst);
+                fields.extend(bound.fields);
+                bound.tail
+            } else {
+                row.tail.clone()
+            }
+        }
+        None => None,
+    };
+
+    ContextRowType { fields, tail }
 }
 
 fn substitute_row(row: &RowType, subst: &Substitution) -> RowType {
@@ -3006,6 +3385,7 @@ impl std::fmt::Display for Type {
             Type::Var(name) => write!(f, "{name}"),
             Type::Row(row) => write!(f, "{row}"),
             Type::Effectful { result, effects } => write!(f, "{result} with {effects}"),
+            Type::Contextual { result, context } => write!(f, "{result} given {context}"),
             Type::Function(params, result) => {
                 write!(f, "(")?;
                 for (i, param) in params.iter().enumerate() {
@@ -3039,6 +3419,27 @@ impl std::fmt::Display for EffectRowType {
             write!(f, "...{name}")?;
         }
         write!(f, " >")
+    }
+}
+
+impl std::fmt::Display for ContextRowType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{ ")?;
+        let mut first = true;
+        for field in &self.fields {
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "{}: {}", field.name, field.ty)?;
+        }
+        if let Some(RowTailType::Var(name)) = &self.tail {
+            if !first {
+                write!(f, ", ")?;
+            }
+            write!(f, "...{name}")?;
+        }
+        write!(f, " }}")
     }
 }
 

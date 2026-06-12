@@ -1,6 +1,6 @@
 use crate::CompileSession;
 use crate::ir::*;
-use fx_core::check::{RowEntry, RowKind, RowType, TypedSpan};
+use fx_core::check::{ContextFieldType, RowEntry, RowKind, RowType, TypedSpan};
 use fx_core::{AnalysisDiagnostic, SymbolKind, Type};
 use fx_syntax::ast::*;
 use fx_syntax::span::Span;
@@ -29,6 +29,7 @@ struct ModuleLowerer<'a, 'b> {
     module: &'b fx_core::module::IndexedModule,
     typed_spans: &'b [TypedSpan],
     default_scopes: Vec<CoreExpr>,
+    context_providers: Vec<BTreeMap<String, CoreExpr>>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ impl CoreLowerer<'_> {
                     module,
                     typed_spans,
                     default_scopes: Vec::new(),
+                    context_providers: Vec::new(),
                 }
                 .lower_module()
             })
@@ -168,18 +170,34 @@ impl ModuleLowerer<'_, '_> {
             Type::Function(params, result) => (params, *result),
             other => (Vec::new(), other),
         };
-        let params = decl
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, param)| CoreParam {
-                name: CoreLocalName(param.name.text.clone()),
-                ty: param_types
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| self.lower_type_expr(&param.annotation)),
+        let (context_fields, result_type) = split_contextual_result(result_type);
+        let context_param = if context_fields.is_empty() {
+            None
+        } else {
+            Some(CoreParam {
+                name: CoreLocalName("__context".to_string()),
+                ty: core_closed_record(
+                    context_fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .collect(),
+                ),
             })
-            .collect::<Vec<_>>();
+        };
+        let mut params = context_param.iter().cloned().collect::<Vec<_>>();
+        params.extend(
+            decl.params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| CoreParam {
+                    name: CoreLocalName(param.name.text.clone()),
+                    ty: param_types
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| self.lower_type_expr(&param.annotation)),
+                })
+                .collect::<Vec<_>>(),
+        );
         let mut locals = params
             .iter()
             .map(|param| {
@@ -191,7 +209,64 @@ impl ModuleLowerer<'_, '_> {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let body = self.lower_block(&decl.body, &mut locals, TailPosition::Tail);
+        for field in &context_fields {
+            locals.insert(
+                field.name.clone(),
+                Local {
+                    ty: field.ty.clone(),
+                },
+            );
+        }
+        let context_provider = context_param.as_ref().map(|_| {
+            context_fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.clone(),
+                        CoreExpr {
+                            ty: field.ty.clone(),
+                            span: decl.annotation.span(),
+                            tail: TailPosition::NonTail,
+                            kind: CoreExprKind::Local(CoreLocalName(field.name.clone())),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
+        if let Some(provider) = context_provider {
+            self.context_providers.push(provider);
+        }
+        let mut body = self.lower_block(&decl.body, &mut locals, TailPosition::Tail);
+        if !context_fields.is_empty() {
+            let context_name = CoreLocalName("__context".to_string());
+            for field in context_fields.iter().rev() {
+                let value = CoreExpr {
+                    ty: field.ty.clone(),
+                    span: decl.annotation.span(),
+                    tail: TailPosition::NonTail,
+                    kind: CoreExprKind::Field {
+                        target: Box::new(CoreExpr {
+                            ty: Type::Unknown,
+                            span: decl.annotation.span(),
+                            tail: TailPosition::NonTail,
+                            kind: CoreExprKind::Local(context_name.clone()),
+                        }),
+                        field: field.name.clone(),
+                    },
+                };
+                body = CoreExpr {
+                    ty: body.ty.clone(),
+                    span: decl.body.span,
+                    tail: TailPosition::Tail,
+                    kind: CoreExprKind::Let {
+                        name: CoreLocalName(field.name.clone()),
+                        value: Box::new(value),
+                        body: Box::new(body),
+                    },
+                };
+            }
+            self.context_providers.pop();
+        }
         self.validate_effect_runtime(&body);
 
         CoreValueDecl {
@@ -354,9 +429,28 @@ impl ModuleLowerer<'_, '_> {
                 return self.lower_sugared_call(target, vec![value], expr.span(), locals, tail);
             }
             Expr::With { targets, body, .. } => {
-                let mut current = self.lower_block(body, &mut locals.clone(), TailPosition::Tail);
-                for target in targets.iter().rev() {
-                    let action = self.action_lambda(target.span, current);
+                let mut reversed = targets.iter().rev();
+                let Some(first_target) = reversed.next() else {
+                    return self.lower_block(body, &mut locals.clone(), tail);
+                };
+                let action_ty = self.trailing_action_type(&first_target.target, locals);
+                let mut current = self.lower_action_body(
+                    body,
+                    &action_ty,
+                    &mut locals.clone(),
+                    TailPosition::Tail,
+                );
+                let action = self.action_lambda(first_target.span, current, action_ty.as_ref());
+                current = self.lower_sugared_call(
+                    &first_target.target,
+                    vec![action],
+                    first_target.span,
+                    locals,
+                    tail,
+                );
+                for target in reversed {
+                    let action_ty = self.trailing_action_type(&target.target, locals);
+                    let action = self.action_lambda(target.span, current, action_ty.as_ref());
                     current = self.lower_sugared_call(
                         &target.target,
                         vec![action],
@@ -366,6 +460,9 @@ impl ModuleLowerer<'_, '_> {
                     );
                 }
                 return current;
+            }
+            Expr::Given { fields, body, .. } => {
+                return self.lower_given_expr(fields, body, expr.span(), locals, tail);
             }
             Expr::Within { scope, body, .. } => {
                 let scope = self.lower_scope_name(scope, locals);
@@ -416,6 +513,7 @@ impl ModuleLowerer<'_, '_> {
             .collect::<Vec<_>>();
         lowered_args.extend(trailing);
         let callee_ty = self.type_for_expr(callee, locals);
+        self.insert_context_arg(&callee_ty, &mut lowered_args, span);
         self.insert_elided_scope_arg(&callee_ty, &mut lowered_args);
         let kind = self.lower_call_kind(callee, callee_ty, lowered_args, locals);
         CoreExpr {
@@ -424,6 +522,65 @@ impl ModuleLowerer<'_, '_> {
             tail,
             kind,
         }
+    }
+
+    fn lower_given_expr(
+        &mut self,
+        fields: &[FieldExpr],
+        body: &Block,
+        span: Span,
+        locals: &mut BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExpr {
+        let mut lowered_fields = fields
+            .iter()
+            .map(|field| {
+                let value = self.lower_expr(&field.value, locals, TailPosition::NonTail);
+                (field.name.text.clone(), value)
+            })
+            .collect::<Vec<_>>();
+
+        let mut body_locals = locals.clone();
+        let mut providers = BTreeMap::new();
+        for (name, value) in &lowered_fields {
+            body_locals.insert(
+                name.clone(),
+                Local {
+                    ty: value.ty.clone(),
+                },
+            );
+            providers.insert(
+                name.clone(),
+                CoreExpr {
+                    ty: value.ty.clone(),
+                    span,
+                    tail: TailPosition::NonTail,
+                    kind: CoreExprKind::Local(CoreLocalName(name.clone())),
+                },
+            );
+        }
+
+        self.context_providers.push(providers);
+        let mut lowered = self.lower_block(body, &mut body_locals, tail);
+        self.context_providers.pop();
+
+        while let Some((name, value)) = lowered_fields.pop() {
+            if matches!(&value.kind, CoreExprKind::Local(local) if local.0 == name) {
+                continue;
+            }
+            lowered = CoreExpr {
+                ty: lowered.ty.clone(),
+                span,
+                tail,
+                kind: CoreExprKind::Let {
+                    name: CoreLocalName(name),
+                    value: Box::new(value),
+                    body: Box::new(lowered),
+                },
+            };
+        }
+
+        lowered
     }
 
     fn lower_sugared_call(
@@ -446,6 +603,7 @@ impl ModuleLowerer<'_, '_> {
             other => {
                 let callee_ty = self.type_for_expr(other, locals);
                 let mut args = trailing;
+                self.insert_context_arg(&callee_ty, &mut args, span);
                 self.insert_elided_scope_arg(&callee_ty, &mut args);
                 let kind = self.lower_call_kind(other, callee_ty, args, locals);
                 CoreExpr {
@@ -456,6 +614,63 @@ impl ModuleLowerer<'_, '_> {
                 }
             }
         }
+    }
+
+    fn insert_context_arg(&mut self, callee_ty: &Type, args: &mut Vec<CoreExpr>, span: Span) {
+        let Type::Function(_, result) = callee_ty else {
+            return;
+        };
+        let Type::Contextual { context, .. } = result.as_ref() else {
+            return;
+        };
+        if context.fields.is_empty() {
+            return;
+        }
+
+        let fields = context
+            .fields
+            .iter()
+            .map(|field| {
+                let value = self.context_provider(&field.name).unwrap_or_else(|| {
+                    self.unsupported(
+                        span,
+                        format!("missing context provider `{}` during lowering", field.name),
+                    );
+                    CoreExpr {
+                        ty: Type::Unknown,
+                        span,
+                        tail: TailPosition::NonTail,
+                        kind: CoreExprKind::Unit,
+                    }
+                });
+                CoreRecordField {
+                    name: field.name.clone(),
+                    value,
+                }
+            })
+            .collect::<Vec<_>>();
+        args.insert(
+            0,
+            CoreExpr {
+                ty: core_closed_record(
+                    context
+                        .fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .collect(),
+                ),
+                span,
+                tail: TailPosition::NonTail,
+                kind: CoreExprKind::Record { fields },
+            },
+        );
+    }
+
+    fn context_provider(&self, name: &str) -> Option<CoreExpr> {
+        self.context_providers
+            .iter()
+            .rev()
+            .find_map(|providers| providers.get(name).cloned())
     }
 
     fn lower_call_kind(
@@ -599,13 +814,129 @@ impl ModuleLowerer<'_, '_> {
         }
     }
 
-    fn action_lambda(&mut self, span: Span, body: CoreExpr) -> CoreExpr {
+    fn trailing_action_type(
+        &self,
+        target: &Expr,
+        locals: &BTreeMap<String, Local>,
+    ) -> Option<Type> {
+        match target {
+            Expr::Pipeline { target, .. } => self.trailing_action_type(target, locals),
+            Expr::Call { callee, args, .. } => {
+                let Type::Function(params, _) = self.type_for_expr(callee, locals) else {
+                    return None;
+                };
+                params.get(args.len()).cloned()
+            }
+            other => {
+                let Type::Function(params, _) = self.type_for_expr(other, locals) else {
+                    return None;
+                };
+                params.first().cloned()
+            }
+        }
+    }
+
+    fn lower_action_body(
+        &mut self,
+        body: &Block,
+        action_ty: &Option<Type>,
+        locals: &mut BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExpr {
+        let Some((context_fields, _)) = action_context_fields(action_ty.as_ref()) else {
+            return self.lower_block(body, locals, tail);
+        };
+
+        let context_name = CoreLocalName("__context".to_string());
+        locals.insert(
+            context_name.0.clone(),
+            Local {
+                ty: core_closed_record(
+                    context_fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .collect(),
+                ),
+            },
+        );
+        for field in context_fields {
+            locals.insert(
+                field.name.clone(),
+                Local {
+                    ty: field.ty.clone(),
+                },
+            );
+        }
+        let providers = context_fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    CoreExpr {
+                        ty: field.ty.clone(),
+                        span: body.span,
+                        tail: TailPosition::NonTail,
+                        kind: CoreExprKind::Local(CoreLocalName(field.name.clone())),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.context_providers.push(providers);
+        let mut lowered = self.lower_block(body, locals, tail);
+        self.context_providers.pop();
+
+        for field in context_fields.iter().rev() {
+            let value = CoreExpr {
+                ty: field.ty.clone(),
+                span: body.span,
+                tail: TailPosition::NonTail,
+                kind: CoreExprKind::Field {
+                    target: Box::new(CoreExpr {
+                        ty: Type::Unknown,
+                        span: body.span,
+                        tail: TailPosition::NonTail,
+                        kind: CoreExprKind::Local(context_name.clone()),
+                    }),
+                    field: field.name.clone(),
+                },
+            };
+            lowered = CoreExpr {
+                ty: lowered.ty.clone(),
+                span: body.span,
+                tail,
+                kind: CoreExprKind::Let {
+                    name: CoreLocalName(field.name.clone()),
+                    value: Box::new(value),
+                    body: Box::new(lowered),
+                },
+            };
+        }
+
+        lowered
+    }
+
+    fn action_lambda(&mut self, span: Span, body: CoreExpr, action_ty: Option<&Type>) -> CoreExpr {
+        let params = action_context_fields(action_ty)
+            .map(|(context_fields, _)| {
+                vec![CoreParam {
+                    name: CoreLocalName("__context".to_string()),
+                    ty: core_closed_record(
+                        context_fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty.clone()))
+                            .collect(),
+                    ),
+                }]
+            })
+            .unwrap_or_default();
         CoreExpr {
-            ty: Type::Function(Vec::new(), Box::new(body.ty.clone())),
+            ty: action_ty
+                .cloned()
+                .unwrap_or_else(|| Type::Function(Vec::new(), Box::new(body.ty.clone()))),
             span,
             tail: TailPosition::NonTail,
             kind: CoreExprKind::Lambda {
-                params: Vec::new(),
+                params,
                 body: Box::new(body),
             },
         }
@@ -790,6 +1121,7 @@ impl ModuleLowerer<'_, '_> {
                 Box::new(self.lower_type_expr(result)),
             ),
             TypeExpr::Effect { result, .. } => self.lower_type_expr(result),
+            TypeExpr::Context { result, .. } => self.lower_type_expr(result),
             TypeExpr::Record { fields, .. } => Type::Row(RowType {
                 kind: RowKind::Record,
                 entries: fields
@@ -1265,6 +1597,37 @@ fn core_needs_effect_runtime(expr: &CoreExpr) -> bool {
     }
 }
 
+fn split_contextual_result(ty: Type) -> (Vec<ContextFieldType>, Type) {
+    match ty {
+        Type::Contextual { result, context } => (context.fields, *result),
+        other => (Vec::new(), other),
+    }
+}
+
+fn action_context_fields(action_ty: Option<&Type>) -> Option<(&[ContextFieldType], &Type)> {
+    let Type::Function(_, result) = action_ty? else {
+        return None;
+    };
+    let Type::Contextual { result, context } = result.as_ref() else {
+        return None;
+    };
+    if context.fields.is_empty() {
+        return None;
+    }
+    Some((context.fields.as_slice(), result.as_ref()))
+}
+
+fn core_closed_record(fields: Vec<(String, Type)>) -> Type {
+    Type::Row(RowType {
+        kind: RowKind::Record,
+        entries: fields
+            .into_iter()
+            .map(|(name, ty)| RowEntry::Field { name, ty })
+            .collect(),
+        tail: None,
+    })
+}
+
 fn first_scoped_effect_scope(ty: &Type, family: &str) -> Option<Type> {
     let Type::Effectful { effects, .. } = ty else {
         return None;
@@ -1278,7 +1641,15 @@ fn first_scoped_effect_scope(ty: &Type, family: &str) -> Option<Type> {
 }
 
 fn core_returns_effectful(ty: &Type) -> bool {
-    matches!(ty, Type::Function(_, result) if matches!(result.as_ref(), Type::Effectful { .. }))
+    matches!(ty, Type::Function(_, result) if core_type_is_effectful(result))
+}
+
+fn core_type_is_effectful(ty: &Type) -> bool {
+    match ty {
+        Type::Effectful { .. } => true,
+        Type::Contextual { result, .. } => core_type_is_effectful(result),
+        _ => false,
+    }
 }
 
 fn parse_display_type(display: &str) -> Type {
@@ -1527,6 +1898,42 @@ catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
         assert!(tree.contains("expr operation"));
     }
 
+    #[test]
+    fn lowers_contextual_calls_with_hidden_context_records() {
+        let analysis = analyze_workspace(
+            &PathBuf::from("examples/phase-5"),
+            vec![source(
+                "examples/phase-5/main.fx",
+                r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+export main() : Text
+  given { clock = { now: "10:00" } }
+    stamp(" started")
+"#,
+            )],
+        );
+        let session = prepare_compile(analysis, CompileOptions::default()).expect("session");
+        let program = lower_to_core(&session).expect("core program");
+        let module = program
+            .modules
+            .iter()
+            .find(|module| module.name == "main")
+            .expect("main module");
+        let stamp = value_decl(module, "stamp");
+        let main = value_decl(module, "main");
+
+        assert_eq!(stamp.params[0].name.0, "__context");
+        assert!(extracts_context_field(&stamp.body, "clock"));
+        assert!(contains_context_record_call_to(
+            &main.body, "stamp", "clock"
+        ));
+    }
+
     fn phase_2_5_session() -> crate::CompileSession {
         let analysis = analyze_workspace(
             &PathBuf::from("examples/phase-2.5"),
@@ -1552,6 +1959,121 @@ catch(default: a, action: () -> a with <Raise, ...e>) : a with <...e>
         SourceFile {
             path: PathBuf::from(path),
             source: source.to_string(),
+        }
+    }
+
+    fn value_decl<'a>(module: &'a CoreModule, name: &str) -> &'a CoreValueDecl {
+        module
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                CoreDecl::Value(value) if value.name.name == name => Some(value),
+                _ => None,
+            })
+            .expect("value declaration")
+    }
+
+    fn extracts_context_field(expr: &CoreExpr, field: &str) -> bool {
+        match &expr.kind {
+            CoreExprKind::Let { name, value, body } => {
+                name.0 == field
+                    && matches!(
+                        &value.kind,
+                        CoreExprKind::Field { target, field: extracted }
+                            if extracted == field
+                                && matches!(
+                                    &target.kind,
+                                    CoreExprKind::Local(local) if local.0 == "__context"
+                                )
+                    )
+                    || extracts_context_field(body, field)
+            }
+            _ => false,
+        }
+    }
+
+    fn contains_context_record_call_to(expr: &CoreExpr, callee_name: &str, field: &str) -> bool {
+        match &expr.kind {
+            CoreExprKind::Call { callee, args } => {
+                matches!(
+                    &callee.kind,
+                    CoreExprKind::Global(global) if global.name == callee_name
+                ) && matches!(
+                    args.first().map(|arg| &arg.kind),
+                    Some(CoreExprKind::Record { fields })
+                        if fields.iter().any(|record_field| record_field.name == field)
+                ) || contains_context_record_call_to(callee, callee_name, field)
+                    || args
+                        .iter()
+                        .any(|arg| contains_context_record_call_to(arg, callee_name, field))
+            }
+            CoreExprKind::Let { value, body, .. } | CoreExprKind::Sequence { value, body } => {
+                contains_context_record_call_to(value, callee_name, field)
+                    || contains_context_record_call_to(body, callee_name, field)
+            }
+            CoreExprKind::Lambda { body, .. } => {
+                contains_context_record_call_to(body, callee_name, field)
+            }
+            CoreExprKind::Record { fields } => fields.iter().any(|field_expr| {
+                contains_context_record_call_to(&field_expr.value, callee_name, field)
+            }),
+            CoreExprKind::Field { target, .. } => {
+                contains_context_record_call_to(target, callee_name, field)
+            }
+            CoreExprKind::RecordUpdate { base, fields } => {
+                contains_context_record_call_to(base, callee_name, field)
+                    || fields.iter().any(|field_expr| {
+                        contains_context_record_call_to(&field_expr.value, callee_name, field)
+                    })
+            }
+            CoreExprKind::Variant { args, .. } | CoreExprKind::List(args) => args
+                .iter()
+                .any(|arg| contains_context_record_call_to(arg, callee_name, field)),
+            CoreExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                contains_context_record_call_to(condition, callee_name, field)
+                    || contains_context_record_call_to(then_branch, callee_name, field)
+                    || contains_context_record_call_to(else_branch, callee_name, field)
+            }
+            CoreExprKind::Match { scrutinee, arms } => {
+                contains_context_record_call_to(scrutinee, callee_name, field)
+                    || arms
+                        .iter()
+                        .any(|arm| contains_context_record_call_to(&arm.value, callee_name, field))
+            }
+            CoreExprKind::Binary { left, right, .. } => {
+                contains_context_record_call_to(left, callee_name, field)
+                    || contains_context_record_call_to(right, callee_name, field)
+            }
+            CoreExprKind::Handle {
+                action,
+                clauses,
+                return_clause,
+            } => {
+                contains_context_record_call_to(action, callee_name, field)
+                    || clauses.iter().any(|clause| {
+                        contains_context_record_call_to(&clause.body, callee_name, field)
+                    })
+                    || return_clause.as_ref().is_some_and(|clause| {
+                        contains_context_record_call_to(&clause.body, callee_name, field)
+                    })
+            }
+            CoreExprKind::Operation { scoped, args, .. } => {
+                scoped.as_ref().is_some_and(|scoped| {
+                    contains_context_record_call_to(&scoped.scope, callee_name, field)
+                }) || args
+                    .iter()
+                    .any(|arg| contains_context_record_call_to(arg, callee_name, field))
+            }
+            CoreExprKind::Unit
+            | CoreExprKind::Bool(_)
+            | CoreExprKind::Int(_)
+            | CoreExprKind::Text(_)
+            | CoreExprKind::Local(_)
+            | CoreExprKind::Global(_) => false,
         }
     }
 

@@ -191,6 +191,7 @@ impl ModuleResolver<'_> {
     fn resolve_value_decl(&mut self, decl: &ValueDecl) {
         let mut locals = BTreeSet::new();
         let mut type_params = BTreeSet::new();
+        collect_context_locals(&decl.annotation, &mut locals);
         for param in &decl.params {
             locals.insert(param.name.text.clone());
             self.resolve_type_expr(&param.annotation, &type_params);
@@ -290,6 +291,16 @@ impl ModuleResolver<'_> {
                     self.resolve_expr(&target.target, locals);
                 }
                 self.resolve_block(body, &mut locals.clone());
+            }
+            Expr::Given { fields, body, .. } => {
+                for field in fields {
+                    self.resolve_expr(&field.value, locals);
+                }
+                let mut body_locals = locals.clone();
+                for field in fields {
+                    body_locals.insert(field.name.text.clone());
+                }
+                self.resolve_block(body, &mut body_locals);
             }
             Expr::Within { scope, body, .. } => {
                 if !locals.contains(scope.text.as_str()) {
@@ -399,6 +410,14 @@ impl ModuleResolver<'_> {
                 self.resolve_type_expr(result, type_params);
                 for effect in &effects.effects {
                     self.resolve_effect_expr(effect, type_params);
+                }
+            }
+            TypeExpr::Context {
+                result, context, ..
+            } => {
+                self.resolve_type_expr(result, type_params);
+                for field in &context.fields {
+                    self.resolve_type_expr(&field.value, type_params);
                 }
             }
             TypeExpr::Record { fields, .. } => {
@@ -535,6 +554,14 @@ impl ModuleResolver<'_> {
     }
 }
 
+fn collect_context_locals(annotation: &TypeExpr, locals: &mut BTreeSet<String>) {
+    if let TypeExpr::Context { context, .. } = annotation {
+        for field in &context.fields {
+            locals.insert(field.name.text.clone());
+        }
+    }
+}
+
 pub(crate) fn qualified_expr_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Name(name) => Some(name.text.clone()),
@@ -594,6 +621,14 @@ fn collect_type_vars(ty: &TypeExpr, vars: &mut BTreeSet<String>) {
             collect_type_vars(result, vars);
             for effect in &effects.effects {
                 collect_type_vars(effect, vars);
+            }
+        }
+        TypeExpr::Context {
+            result, context, ..
+        } => {
+            collect_type_vars(result, vars);
+            for field in &context.fields {
+                collect_type_vars(&field.value, vars);
             }
         }
         TypeExpr::Named { .. } | TypeExpr::Error { .. } => {}

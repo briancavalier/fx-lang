@@ -305,7 +305,10 @@ try {
 "#,
         );
 
-        assert_eq!(output, "42 Unhandled fx operation main.get at main.OtherCounter");
+        assert_eq!(
+            output,
+            "42 Unhandled fx operation main.get at main.OtherCounter"
+        );
     }
 
     #[test]

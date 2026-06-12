@@ -134,6 +134,11 @@ impl Analysis {
         for item in &module.parsed.module.items {
             if let Item::Value(decl) = item {
                 let mut locals = top_level.clone();
+                if let Some(definition) =
+                    add_context_field_definitions(decl, byte_offset, &mut locals, module)
+                {
+                    return Some(definition);
+                }
                 for param in &decl.params {
                     let definition = DefinitionInfo {
                         module: module.name.clone(),
@@ -154,6 +159,30 @@ impl Analysis {
         }
         None
     }
+}
+
+fn add_context_field_definitions(
+    decl: &ValueDecl,
+    byte_offset: usize,
+    locals: &mut BTreeMap<String, DefinitionInfo>,
+    module: &crate::module::IndexedModule,
+) -> Option<DefinitionInfo> {
+    let TypeExpr::Context { context, .. } = &decl.annotation else {
+        return None;
+    };
+
+    for field in &context.fields {
+        let definition = DefinitionInfo {
+            module: module.name.clone(),
+            path: module.path.clone(),
+            span: field.name.span,
+        };
+        if contains_offset(field.name.span, byte_offset) {
+            return Some(definition);
+        }
+        locals.insert(field.name.text.clone(), definition);
+    }
+    None
 }
 
 fn add_diagnostics(
@@ -291,6 +320,24 @@ fn local_definition_in_expr(
                 local_definition_in_expr(&target.target, byte_offset, locals, module)
             })
             .or_else(|| local_definition_in_block(body, byte_offset, &mut locals.clone(), module)),
+        Expr::Given { fields, body, .. } => fields
+            .iter()
+            .find_map(|field| local_definition_in_expr(&field.value, byte_offset, locals, module))
+            .or_else(|| {
+                let mut body_locals = locals.clone();
+                for field in fields {
+                    let definition = DefinitionInfo {
+                        module: module.name.clone(),
+                        path: module.path.clone(),
+                        span: field.name.span,
+                    };
+                    if contains_offset(field.name.span, byte_offset) {
+                        return Some(definition);
+                    }
+                    body_locals.insert(field.name.text.clone(), definition);
+                }
+                local_definition_in_block(body, byte_offset, &mut body_locals, module)
+            }),
         Expr::Within { body, .. } => {
             local_definition_in_block(body, byte_offset, &mut locals.clone(), module)
         }

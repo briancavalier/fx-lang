@@ -142,6 +142,11 @@ pub enum TypeExpr {
         effects: EffectRow,
         span: Span,
     },
+    Context {
+        result: Box<TypeExpr>,
+        context: ContextRow,
+        span: Span,
+    },
     Record {
         fields: Vec<FieldType>,
         tail: Option<RowTail>,
@@ -169,6 +174,7 @@ impl TypeExpr {
             | TypeExpr::App { span, .. }
             | TypeExpr::Function { span, .. }
             | TypeExpr::Effect { span, .. }
+            | TypeExpr::Context { span, .. }
             | TypeExpr::Record { span, .. }
             | TypeExpr::Variant { span, .. }
             | TypeExpr::Tuple { span, .. }
@@ -180,6 +186,13 @@ impl TypeExpr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectRow {
     pub effects: Vec<TypeExpr>,
+    pub tail: Option<RowTail>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextRow {
+    pub fields: Vec<FieldType>,
     pub tail: Option<RowTail>,
     pub span: Span,
 }
@@ -272,6 +285,11 @@ pub enum Expr {
         body: Block,
         span: Span,
     },
+    Given {
+        fields: Vec<FieldExpr>,
+        body: Block,
+        span: Span,
+    },
     Within {
         scope: Name,
         body: Block,
@@ -313,6 +331,7 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::Pipeline { span, .. }
             | Expr::With { span, .. }
+            | Expr::Given { span, .. }
             | Expr::Within { span, .. }
             | Expr::Handle { span, .. }
             | Expr::Binary { span, .. }

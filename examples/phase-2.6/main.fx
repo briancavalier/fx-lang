@@ -3,8 +3,7 @@
 import support
 
 export main() : Text
-  piped =
-    "Grace" |> append-suffix("!") |> wrap("[", "]")
+  piped = "Grace" |> append-suffix("!") |> wrap("[", "]")
   single =
     with surround("(", ")")
       piped

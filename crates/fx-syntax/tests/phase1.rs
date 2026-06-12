@@ -416,6 +416,148 @@ fn parses_phase_4_goal_fixtures() {
 }
 
 #[test]
+fn parses_context_rows_in_result_and_function_types() {
+    let parsed = parse_file(
+        r#"timestamp(message: Text) : Text given { clock: Clock }
+  message
+
+with-clock(action: () -> a given { clock: Clock, ...c }) : a given { ...c }
+  action()
+
+log-time(message: Text) : Unit with <Console, ...e> given { clock: Clock, ...c }
+  unit
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(timestamp) = &parsed.module.items[0] else {
+        panic!("expected timestamp value");
+    };
+    let TypeExpr::Context { context, .. } = &timestamp.annotation else {
+        panic!("expected contextual return type");
+    };
+    assert_eq!(context.fields.len(), 1);
+    assert!(context.tail.is_none());
+
+    let Item::Value(with_clock) = &parsed.module.items[1] else {
+        panic!("expected with-clock value");
+    };
+    let TypeExpr::Function { result, .. } = &with_clock.params[0].annotation else {
+        panic!("expected contextual function parameter type");
+    };
+    assert!(matches!(result.as_ref(), TypeExpr::Context { .. }));
+    let TypeExpr::Context { context, .. } = &with_clock.annotation else {
+        panic!("expected contextual return type");
+    };
+    assert!(context.tail.is_some());
+
+    let Item::Value(log_time) = &parsed.module.items[2] else {
+        panic!("expected log-time value");
+    };
+    let TypeExpr::Context {
+        result, context, ..
+    } = &log_time.annotation
+    else {
+        panic!("expected contextual effectful return type");
+    };
+    assert!(matches!(result.as_ref(), TypeExpr::Effect { .. }));
+    assert_eq!(context.fields.len(), 1);
+    assert!(context.tail.is_some());
+}
+
+#[test]
+fn reports_malformed_context_row_tails() {
+    let parsed = parse_file(
+        r#"bad() : Text given { clock: Clock, ...c, locale: Locale }
+  ""
+
+also-bad() : Text given { clock: Clock, ...c, ...d }
+  ""
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("context row spread must appear last")
+    }));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("duplicate context row spread") })
+    );
+}
+
+#[test]
+fn parses_given_provider_expressions() {
+    let parsed = parse_file(
+        r#"main() : Text
+  given { clock = system-clock(), config = read-config() }
+    timestamp("started")
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(main) = &parsed.module.items[0] else {
+        panic!("expected main value");
+    };
+    let Expr::Given { fields, body, .. } = main.body.result.as_ref() else {
+        panic!("expected given expression");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name.text, "clock");
+    assert_eq!(fields[1].name.text, "config");
+    assert!(matches!(body.result.as_ref(), Expr::Call { .. }));
+}
+
+#[test]
+fn reports_deferred_phase_5_given_forms() {
+    let parsed = parse_file(
+        r#"given clock = system-clock()
+
+main() : Text
+  given each { clock = system-clock() }
+    timestamp("started")
+
+call-site() : Text
+  timestamp("started") given { clock = system-clock() }
+"#,
+    );
+
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("module-level contextual exports are not supported in Phase 5")
+    }));
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("given each is not supported in Phase 5")
+    }));
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("final given arguments are not supported in Phase 5")
+    }));
+}
+
+#[test]
+fn parses_phase_5_goal_fixtures() {
+    for source in [
+        include_str!("../../../examples/phase-5/basic.fx"),
+        include_str!("../../../examples/phase-5/effects.fx"),
+        include_str!("../../../examples/phase-5/with-clock.fx"),
+        include_str!("../../../examples/phase-5/higher-order.fx"),
+        include_str!("../../../examples/phase-5/diagnostics.fx.txt"),
+    ] {
+        let parsed = parse_file(source);
+
+        assert_eq!(parsed.diagnostics, []);
+    }
+}
+
+#[test]
 fn reports_malformed_effect_row_tails() {
     let parsed = parse_file(
         r#"bad() : Int with <Raise, ...e, Other>

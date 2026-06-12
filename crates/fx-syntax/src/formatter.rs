@@ -1,5 +1,5 @@
 use crate::ast::{
-    BinaryOp, Block, EffectDecl, EffectRow, Expr, FieldExpr, FieldType, HandlerClause,
+    BinaryOp, Block, ContextRow, EffectDecl, EffectRow, Expr, FieldExpr, FieldType, HandlerClause,
     HandlerReturnClause, ImportDecl, Item, LambdaParam, LetStmt, MatchArm, Name, OperationDecl,
     Param, Pattern, RowTail, ScopeDecl, Stmt, TypeDecl, TypeExpr, ValueDecl, VariantCaseType,
     WithTarget,
@@ -381,6 +381,15 @@ fn format_type(ty: &TypeExpr) -> String {
                 format_effect_row(effects)
             )
         }
+        TypeExpr::Context {
+            result, context, ..
+        } => {
+            format!(
+                "{} given {}",
+                format_type(result),
+                format_context_row(context)
+            )
+        }
         TypeExpr::Record { fields, tail, .. } => format_record_type(fields, tail.as_ref()),
         TypeExpr::Variant { cases, tail, .. } => format_variant_type(cases, tail.as_ref()),
         TypeExpr::Tuple { elems, .. } => {
@@ -395,7 +404,9 @@ fn format_type(ty: &TypeExpr) -> String {
 
 fn format_type_atom(ty: &TypeExpr) -> String {
     match ty {
-        TypeExpr::Function { .. } | TypeExpr::Effect { .. } => format!("({})", format_type(ty)),
+        TypeExpr::Function { .. } | TypeExpr::Effect { .. } | TypeExpr::Context { .. } => {
+            format!("({})", format_type(ty))
+        }
         _ => format_type(ty),
     }
 }
@@ -414,6 +425,18 @@ fn format_record_type(fields: &[FieldType], tail: Option<&RowTail>) -> String {
         .map(|field| format!("{}: {}", field.name.text, format_type(&field.value)))
         .collect::<Vec<_>>();
     if let Some(tail) = tail {
+        parts.push(format_row_tail(tail));
+    }
+    format!("{{ {} }}", parts.join(", "))
+}
+
+fn format_context_row(row: &ContextRow) -> String {
+    let mut parts = row
+        .fields
+        .iter()
+        .map(|field| format!("{}: {}", field.name.text, format_type(&field.value)))
+        .collect::<Vec<_>>();
+    if let Some(tail) = &row.tail {
         parts.push(format_row_tail(tail));
     }
     format!("{{ {} }}", parts.join(", "))
@@ -513,6 +536,7 @@ fn format_expr(expr: &Expr) -> String {
         } => format_match_expr(scrutinee, arms),
         Expr::Pipeline { .. } => format_pipeline_expr(expr),
         Expr::With { targets, body, .. } => format_with_expr(targets, body),
+        Expr::Given { fields, body, .. } => format_given_expr(fields, body),
         Expr::Within { scope, body, .. } => format_within_expr(scope, body),
         Expr::Handle {
             action,
@@ -646,6 +670,24 @@ fn format_with_expr(targets: &[WithTarget], body: &Block) -> String {
     output
 }
 
+fn format_given_expr(fields: &[FieldExpr], body: &Block) -> String {
+    let mut output = format!("given {}", format_given_fields(fields));
+    output.push('\n');
+    output.push_str(&format_block(body, 1));
+    output
+}
+
+fn format_given_fields(fields: &[FieldExpr]) -> String {
+    format!(
+        "{{ {} }}",
+        fields
+            .iter()
+            .map(|field| format!("{} = {}", field.name.text, format_expr(&field.value)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 fn format_within_expr(scope: &Name, body: &Block) -> String {
     let mut output = format!("within {}", scope.text);
     output.push('\n');
@@ -735,7 +777,11 @@ fn format_pattern(pattern: &Pattern) -> String {
 fn is_inline_expr(expr: &Expr) -> bool {
     !matches!(
         expr,
-        Expr::Match { .. } | Expr::With { .. } | Expr::Within { .. } | Expr::Handle { .. }
+        Expr::Match { .. }
+            | Expr::With { .. }
+            | Expr::Given { .. }
+            | Expr::Within { .. }
+            | Expr::Handle { .. }
     )
 }
 

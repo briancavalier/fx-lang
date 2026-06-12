@@ -9,7 +9,9 @@ export effect Console
   log(message: Text) : Unit
 
 scope Counter with <State Int>
+
 scope Session with <State Int>
+
 # Expected: scope protocol row must name a scoped effect family.
 scope BadConsole with <Console>
 

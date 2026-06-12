@@ -1,0 +1,20 @@
+export type Clock = {
+  now: Text
+}
+
+system-clock() : Clock
+  { now: "00:00" }
+
+timestamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ " " ++ message
+
+bad-missing() : Text
+  timestamp("started")
+
+bad-provider-type() : Text
+  given { clock = "not a clock" }
+    timestamp("started")
+
+bad-duplicate() : Text
+  given { clock = system-clock(), clock = system-clock() }
+    timestamp("started")

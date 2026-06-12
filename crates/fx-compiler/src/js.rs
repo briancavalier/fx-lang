@@ -254,7 +254,10 @@ impl<'a> ExprEmitter<'a> {
                 operation,
                 scoped,
                 args,
-            } => format!("__fx.run({})", self.perform(operation, scoped.as_ref(), args)),
+            } => format!(
+                "__fx.run({})",
+                self.perform(operation, scoped.as_ref(), args)
+            ),
             CoreExprKind::Handle { .. } => format!("__fx.run({})", self.computation(expr)),
             CoreExprKind::Record { fields } => self.record(fields),
             CoreExprKind::Field { target, field } => {
@@ -664,7 +667,11 @@ fn needs_effect_runtime(expr: &CoreExpr) -> bool {
 }
 
 fn is_effectful_type(ty: &fx_core::Type) -> bool {
-    matches!(ty, fx_core::Type::Effectful { .. })
+    match ty {
+        fx_core::Type::Effectful { .. } => true,
+        fx_core::Type::Contextual { result, .. } => is_effectful_type(result),
+        _ => false,
+    }
 }
 
 fn returns_effectful(ty: &fx_core::Type) -> bool {
