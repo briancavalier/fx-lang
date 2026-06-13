@@ -2,6 +2,7 @@ use fx_core::{
     Analysis, AnalysisDiagnostic, SourceFile, Symbol, SymbolKind as FxSymbolKind, analyze_workspace,
 };
 use fx_syntax::span::Span;
+use fx_syntax::{SyntaxTokenKind, lex_source};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +15,11 @@ use tower_lsp::lsp_types::{
     DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, Location, MarkedString, OneOf, Position, Range,
-    ServerCapabilities, SymbolInformation, SymbolKind as LspSymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolInformation,
+    SymbolKind as LspSymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    WorkDoneProgressOptions, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -65,6 +69,16 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions::default(),
+                            legend: semantic_tokens_legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..ServerCapabilities::default()
             },
             server_info: None,
@@ -192,6 +206,19 @@ impl LanguageServer for Backend {
         Ok(Some(workspace_symbols_for_analysis(
             &analysis,
             params.query.as_str(),
+        )))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(snapshot) = self.analysis_for_uri(&uri).await else {
+            return Ok(None);
+        };
+        Ok(Some(SemanticTokensResult::Tokens(
+            semantic_tokens_for_document(&snapshot.analysis, &snapshot.document),
         )))
     }
 }
@@ -436,6 +463,202 @@ fn lsp_symbol_kind(kind: FxSymbolKind) -> LspSymbolKind {
     }
 }
 
+const TOKEN_COMMENT: u32 = 0;
+const TOKEN_KEYWORD: u32 = 1;
+const TOKEN_STRING: u32 = 2;
+const TOKEN_NUMBER: u32 = 3;
+const TOKEN_OPERATOR: u32 = 4;
+const TOKEN_FUNCTION: u32 = 5;
+const TOKEN_VARIABLE: u32 = 6;
+const TOKEN_PARAMETER: u32 = 7;
+const TOKEN_PROPERTY: u32 = 8;
+const TOKEN_TYPE: u32 = 9;
+const TOKEN_ENUM_MEMBER: u32 = 10;
+const TOKEN_INTERFACE: u32 = 11;
+const TOKEN_NAMESPACE: u32 = 12;
+
+const MOD_DECLARATION: u32 = 1 << 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawSemanticToken {
+    span: Span,
+    token_type: u32,
+    token_modifiers_bitset: u32,
+    priority: u8,
+}
+
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::COMMENT,
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::STRING,
+            SemanticTokenType::NUMBER,
+            SemanticTokenType::OPERATOR,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::INTERFACE,
+            SemanticTokenType::NAMESPACE,
+        ],
+        token_modifiers: vec![
+            SemanticTokenModifier::DECLARATION,
+            SemanticTokenModifier::READONLY,
+            SemanticTokenModifier::DEFAULT_LIBRARY,
+        ],
+    }
+}
+
+fn semantic_tokens_for_document(analysis: &Analysis, document: &Document) -> SemanticTokens {
+    let mut raw = lexical_semantic_tokens(&document.text);
+    if let Some(module_name) = analysis.module_for_path(&document.path) {
+        if let Some(module) = analysis.graph.modules.get(module_name) {
+            for symbol in &module.symbols {
+                raw.push(RawSemanticToken {
+                    span: symbol.span,
+                    token_type: semantic_token_type_for_symbol_kind(symbol.kind),
+                    token_modifiers_bitset: MOD_DECLARATION,
+                    priority: 4,
+                });
+            }
+        }
+
+        if let Some(resolved) = analysis.resolved.modules.get(module_name) {
+            for reference in &resolved.references {
+                raw.push(RawSemanticToken {
+                    span: reference.span,
+                    token_type: semantic_token_type_for_symbol_kind(reference.target.kind),
+                    token_modifiers_bitset: 0,
+                    priority: 3,
+                });
+            }
+        }
+
+        if let Some(typed_spans) = analysis.check.typed_spans.get(module_name) {
+            for typed in typed_spans {
+                raw.push(RawSemanticToken {
+                    span: typed.span,
+                    token_type: semantic_token_type_for_typed_span_kind(typed.kind),
+                    token_modifiers_bitset: 0,
+                    priority: 2,
+                });
+            }
+        }
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data: encode_semantic_tokens(raw, &document.line_index),
+    }
+}
+
+fn lexical_semantic_tokens(source: &str) -> Vec<RawSemanticToken> {
+    lex_source(source)
+        .tokens
+        .into_iter()
+        .filter_map(|token| {
+            let token_type = match token.kind {
+                SyntaxTokenKind::Comment => TOKEN_COMMENT,
+                SyntaxTokenKind::Keyword(_) => TOKEN_KEYWORD,
+                SyntaxTokenKind::Text(_) => TOKEN_STRING,
+                SyntaxTokenKind::Int(_) => TOKEN_NUMBER,
+                SyntaxTokenKind::PipeGreater
+                | SyntaxTokenKind::Equal
+                | SyntaxTokenKind::Arrow
+                | SyntaxTokenKind::PlusPlus
+                | SyntaxTokenKind::EqEq
+                | SyntaxTokenKind::Plus
+                | SyntaxTokenKind::Minus
+                | SyntaxTokenKind::Spread => TOKEN_OPERATOR,
+                _ => return None,
+            };
+            Some(RawSemanticToken {
+                span: token.span,
+                token_type,
+                token_modifiers_bitset: 0,
+                priority: 1,
+            })
+        })
+        .collect()
+}
+
+fn encode_semantic_tokens(
+    mut raw_tokens: Vec<RawSemanticToken>,
+    line_index: &LineIndex,
+) -> Vec<SemanticToken> {
+    raw_tokens.retain(|token| token.span.start < token.span.end);
+    raw_tokens.sort_by(|a, b| {
+        a.span
+            .start
+            .cmp(&b.span.start)
+            .then_with(|| b.priority.cmp(&a.priority))
+            .then_with(|| a.span.end.cmp(&b.span.end))
+            .then_with(|| a.token_type.cmp(&b.token_type))
+    });
+
+    let mut encoded = Vec::new();
+    let mut covered_until = 0usize;
+    let mut previous_line = 0u32;
+    let mut previous_start = 0u32;
+
+    for raw in raw_tokens {
+        if raw.span.start < covered_until {
+            continue;
+        }
+        let range = line_index.span_to_range(raw.span);
+        if range.start.line != range.end.line || range.start.character == range.end.character {
+            continue;
+        }
+        let delta_line = range.start.line - previous_line;
+        let delta_start = if delta_line == 0 {
+            range.start.character - previous_start
+        } else {
+            range.start.character
+        };
+        encoded.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: range.end.character - range.start.character,
+            token_type: raw.token_type,
+            token_modifiers_bitset: raw.token_modifiers_bitset,
+        });
+        previous_line = range.start.line;
+        previous_start = range.start.character;
+        covered_until = raw.span.end;
+    }
+
+    encoded
+}
+
+fn semantic_token_type_for_symbol_kind(kind: FxSymbolKind) -> u32 {
+    match kind {
+        FxSymbolKind::Value => TOKEN_FUNCTION,
+        FxSymbolKind::Type => TOKEN_TYPE,
+        FxSymbolKind::Constructor => TOKEN_ENUM_MEMBER,
+        FxSymbolKind::Effect => TOKEN_INTERFACE,
+        FxSymbolKind::Operation => TOKEN_FUNCTION,
+        FxSymbolKind::Scope => TOKEN_NAMESPACE,
+    }
+}
+
+fn semantic_token_type_for_typed_span_kind(kind: fx_core::check::TypedSpanKind) -> u32 {
+    match kind {
+        fx_core::check::TypedSpanKind::Value => TOKEN_FUNCTION,
+        fx_core::check::TypedSpanKind::Type => TOKEN_TYPE,
+        fx_core::check::TypedSpanKind::Effect => TOKEN_INTERFACE,
+        fx_core::check::TypedSpanKind::Operation => TOKEN_FUNCTION,
+        fx_core::check::TypedSpanKind::Scope => TOKEN_NAMESPACE,
+        fx_core::check::TypedSpanKind::Constructor => TOKEN_ENUM_MEMBER,
+        fx_core::check::TypedSpanKind::Parameter => TOKEN_PARAMETER,
+        fx_core::check::TypedSpanKind::Local => TOKEN_VARIABLE,
+        fx_core::check::TypedSpanKind::Pattern => TOKEN_VARIABLE,
+        fx_core::check::TypedSpanKind::Field => TOKEN_PROPERTY,
+    }
+}
+
 fn lsp_diagnostics_for_document(
     document: &Document,
     diagnostics: &[AnalysisDiagnostic],
@@ -562,13 +785,18 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Document, LineIndex, completions_for_analysis, document_symbols_for_document,
-        lsp_diagnostics_for_document, workspace_symbols_for_analysis,
+        Document, LineIndex, MOD_DECLARATION, TOKEN_COMMENT, TOKEN_ENUM_MEMBER, TOKEN_FUNCTION,
+        TOKEN_INTERFACE, TOKEN_KEYWORD, TOKEN_NAMESPACE, TOKEN_NUMBER, TOKEN_OPERATOR,
+        TOKEN_PARAMETER, TOKEN_PROPERTY, TOKEN_STRING, TOKEN_TYPE, TOKEN_VARIABLE,
+        completions_for_analysis, document_symbols_for_document, encode_semantic_tokens,
+        lexical_semantic_tokens, lsp_diagnostics_for_document, semantic_tokens_for_document,
+        workspace_symbols_for_analysis,
     };
     use fx_core::{AnalysisDiagnostic, SourceFile, analyze_workspace};
     use fx_syntax::span::Span;
     use std::path::PathBuf;
     use tower_lsp::lsp_types::CompletionItemKind;
+    use tower_lsp::lsp_types::SemanticToken;
     use tower_lsp::lsp_types::Url;
     use tower_lsp::lsp_types::{Position, SymbolKind};
 
@@ -642,6 +870,112 @@ mod tests {
                 line: 2,
                 character: 0
             }
+        );
+    }
+
+    #[test]
+    fn semantic_token_encoding_uses_utf16_deltas() {
+        let index = LineIndex::new("a😀b\n  c\n");
+        let raw = vec![
+            super::RawSemanticToken {
+                span: Span::new("a😀".len(), "a😀b".len()),
+                token_type: TOKEN_VARIABLE,
+                token_modifiers_bitset: 0,
+                priority: 1,
+            },
+            super::RawSemanticToken {
+                span: Span::new("a😀b\n  ".len(), "a😀b\n  c".len()),
+                token_type: TOKEN_VARIABLE,
+                token_modifiers_bitset: 0,
+                priority: 1,
+            },
+        ];
+
+        assert_eq!(
+            encode_semantic_tokens(raw, &index),
+            vec![
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 3,
+                    length: 1,
+                    token_type: TOKEN_VARIABLE,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 1,
+                    delta_start: 2,
+                    length: 1,
+                    token_type: TOKEN_VARIABLE,
+                    token_modifiers_bitset: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_token_encoding_sorts_and_skips_overlapping_tokens() {
+        let index = LineIndex::new("alpha beta");
+        let raw = vec![
+            super::RawSemanticToken {
+                span: Span::new(6, 10),
+                token_type: TOKEN_VARIABLE,
+                token_modifiers_bitset: 0,
+                priority: 1,
+            },
+            super::RawSemanticToken {
+                span: Span::new(0, 5),
+                token_type: TOKEN_VARIABLE,
+                token_modifiers_bitset: 0,
+                priority: 1,
+            },
+            super::RawSemanticToken {
+                span: Span::new(0, 5),
+                token_type: TOKEN_FUNCTION,
+                token_modifiers_bitset: MOD_DECLARATION,
+                priority: 4,
+            },
+        ];
+
+        assert_eq!(
+            encode_semantic_tokens(raw, &index),
+            vec![
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 0,
+                    length: 5,
+                    token_type: TOKEN_FUNCTION,
+                    token_modifiers_bitset: MOD_DECLARATION,
+                },
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 6,
+                    length: 4,
+                    token_type: TOKEN_VARIABLE,
+                    token_modifiers_bitset: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_semantic_tokens_classify_basic_source_tokens() {
+        let source = "# note\nanswer : Int\n  if 1 == 1 then \"yes\" else \"no\"\n  x |> f(1) ++ y -> ...z\n  y = y + 1\n";
+        let tokens = lexical_semantic_tokens(source);
+        let types = tokens
+            .iter()
+            .map(|token| token.token_type)
+            .collect::<Vec<_>>();
+
+        assert!(types.contains(&TOKEN_COMMENT));
+        assert!(types.contains(&TOKEN_KEYWORD));
+        assert!(types.contains(&TOKEN_NUMBER));
+        assert!(types.contains(&TOKEN_STRING));
+        assert!(
+            types
+                .iter()
+                .filter(|token_type| **token_type == TOKEN_OPERATOR)
+                .count()
+                >= 6
         );
     }
 
@@ -748,6 +1082,61 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn semantic_tokens_classify_phase_1_declarations_and_references() {
+        let source = include_str!("../../../examples/phase-1/todo.fx");
+        let path = "/private/tmp/todo.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let tokens = semantic_tokens_for_document(&analysis, &document).data;
+
+        assert_has_token(&tokens, TOKEN_TYPE, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_ENUM_MEMBER, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_FUNCTION, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_TYPE, 0);
+        assert_has_token(&tokens, TOKEN_ENUM_MEMBER, 0);
+    }
+
+    #[test]
+    fn semantic_tokens_classify_phase_3_effects_and_operations() {
+        let source = include_str!("../../../examples/phase-3/effects.fx");
+        let path = "/private/tmp/effects.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let tokens = semantic_tokens_for_document(&analysis, &document).data;
+
+        assert_has_token(&tokens, TOKEN_INTERFACE, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_FUNCTION, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_INTERFACE, 0);
+        assert_has_token(&tokens, TOKEN_FUNCTION, 0);
+    }
+
+    #[test]
+    fn semantic_tokens_classify_phase_4_scopes_and_scoped_operations() {
+        let source = include_str!("../../../examples/phase-4/state.fx");
+        let path = "/private/tmp/state.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let tokens = semantic_tokens_for_document(&analysis, &document).data;
+
+        assert_has_token(&tokens, TOKEN_NAMESPACE, MOD_DECLARATION);
+        assert_has_token(&tokens, TOKEN_NAMESPACE, 0);
+        assert_has_token(&tokens, TOKEN_FUNCTION, 0);
+    }
+
+    #[test]
+    fn semantic_tokens_classify_phase_5_contextual_typed_spans() {
+        let source = "export type Clock = { now: Text }\n\nstamp(message: Text) : Text given { clock: Clock }\n  now = clock.now\n  now ++ message\n";
+        let path = "/private/tmp/basic.fx";
+        let analysis = analysis_with_files(vec![source_file(path, source)]);
+        let document = document(path, source);
+        let tokens = semantic_tokens_for_document(&analysis, &document).data;
+
+        assert_has_token(&tokens, TOKEN_PARAMETER, 0);
+        assert_has_token(&tokens, TOKEN_VARIABLE, 0);
+        assert_has_token(&tokens, TOKEN_PROPERTY, 0);
+    }
+
     fn document(path: &str, text: &str) -> Document {
         Document::new(
             Url::from_file_path(path).expect("file url"),
@@ -774,5 +1163,14 @@ mod tests {
             path: PathBuf::from(path),
             source: source.to_string(),
         }
+    }
+
+    fn assert_has_token(tokens: &[SemanticToken], token_type: u32, modifier: u32) {
+        assert!(
+            tokens.iter().any(|token| {
+                token.token_type == token_type && token.token_modifiers_bitset == modifier
+            }),
+            "expected token type {token_type} with modifier {modifier}; tokens: {tokens:?}"
+        );
     }
 }

@@ -647,6 +647,49 @@ main() : Unit with <Console>
     print-line(timestamp("started"))
 ```
 
+## Phase 5.5: Editor semantic highlighting
+
+Goal: improve `.fx` editor highlighting through LSP semantic tokens after
+Phase 5 syntax and semantic metadata are stable.
+
+This phase is tooling-only. It should not change parser, checker, resolver,
+compiler, or formatter behavior except to expose already-computed metadata
+through the language server.
+
+Include:
+
+- a stable semantic-token legend for comments, keywords, strings, numbers,
+  operators, functions, variables, parameters, properties, types, constructors,
+  effects, and scopes;
+- full-document semantic-token support in the language server;
+- lexical token classification from `fx_syntax::lex_source`;
+- semantic overlays from indexed symbols, resolved references, and typed spans;
+- declaration modifiers where declaration spans are already reliable;
+- VS Code extension wiring through the existing language client;
+- editor documentation for launching the extension and confirming semantic
+  highlighting.
+
+Defer:
+
+- semantic-token delta updates;
+- range-only semantic-token requests;
+- theme customization;
+- code actions;
+- inlay hints;
+- folding;
+- a large TextMate grammar.
+
+Tooling success criteria:
+
+- VS Code receives semantic tokens for `.fx` files from `fx-lsp`;
+- generic LSP clients can request full-document semantic tokens;
+- examples through Phase 5 produce sorted, non-overlapping semantic tokens;
+- lexical highlighting covers comments, keywords, strings, numbers, and
+  operators;
+- semantic highlighting distinguishes declarations and references for values,
+  types, constructors, effects, operations, scopes, parameters, locals, patterns,
+  fields, and contextual values.
+
 ## Phase 6: Advanced surface
 
 Goal: fill in power features after the core language, rows, effects, scopes,
