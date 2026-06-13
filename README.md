@@ -18,6 +18,11 @@ This example combines the main ideas:
 - `given { clock: Clock }` is a coeffect: the function needs contextual data,
   but it is not an ordinary parameter.
 
+![Syntax-highlighted fx-lang example](docs/assets/readme-example.svg)
+
+<details>
+<summary>Copyable source</summary>
+
 ```fx
 export scoped effect State s a
   get() : a
@@ -33,6 +38,8 @@ increment-and-label() : Text with <State Counter Int> given { clock: Clock }
     put(n + 1)
     clock.now ++ " count=" ++ show(n + 1)
 ```
+
+</details>
 
 The scope name distinguishes one state cell from another at the type level,
 while `given` tracks required context separately from ordinary function

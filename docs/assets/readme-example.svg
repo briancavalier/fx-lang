@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="570" viewBox="0 0 1040 570" role="img" aria-labelledby="title desc">
+  <title id="title">Syntax-highlighted fx-lang example</title>
+  <desc id="desc">A syntax-highlighted example showing a scoped State effect, Clock type, Counter scope, and increment-and-label function.</desc>
+  <defs>
+    <filter id="terminal-shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <style>
+    .matte { fill: #050507; }
+    .terminal { fill: #2b2d3a; }
+    .highlight { fill: none; stroke: #3b3f52; stroke-opacity: 0.65; }
+    .dot-red { fill: #ff5f57; }
+    .dot-yellow { fill: #ffbd2e; }
+    .dot-green { fill: #28c840; }
+    .code { font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 16px; font-variant-ligatures: contextual common-ligatures; line-height: 30px; fill: #eef2f8; }
+    .kw { fill: #ff7a8a; }
+    .type { fill: #ffd166; }
+    .fn { fill: #82f7b5; }
+    .scope { fill: #5fd7ff; }
+    .prop { fill: #9adfff; }
+    .str { fill: #c7f284; }
+    .op { fill: #f7a8ff; }
+  </style>
+  <rect class="matte" x="0" y="0" width="1040" height="570"/>
+  <rect class="terminal" x="58" y="42" width="924" height="486" rx="7" filter="url(#terminal-shadow)"/>
+  <rect class="highlight" x="58.5" y="42.5" width="923" height="485" rx="6.5"/>
+  <circle class="dot-red" cx="88" cy="72" r="7"/>
+  <circle class="dot-yellow" cx="112" cy="72" r="7"/>
+  <circle class="dot-green" cx="136" cy="72" r="7"/>
+  <text class="code" x="88" y="124" xml:space="preserve">
+    <tspan x="88" dy="0"><tspan class="kw">export</tspan> <tspan class="kw">scoped</tspan> <tspan class="kw">effect</tspan> <tspan class="type">State</tspan> s a</tspan>
+    <tspan x="88" dy="30">  <tspan class="fn">get</tspan>() : a</tspan>
+    <tspan x="88" dy="30">  <tspan class="fn">put</tspan>(value: a) : <tspan class="type">Unit</tspan></tspan>
+    <tspan x="88" dy="60"><tspan class="kw">export</tspan> <tspan class="kw">type</tspan> <tspan class="type">Clock</tspan> = { <tspan class="prop">now</tspan>: <tspan class="type">Text</tspan> }</tspan>
+    <tspan x="88" dy="60"><tspan class="kw">scope</tspan> <tspan class="scope">Counter</tspan> <tspan class="kw">with</tspan> &lt;<tspan class="type">State</tspan> <tspan class="type">Int</tspan>&gt;</tspan>
+    <tspan x="88" dy="60"><tspan class="fn">increment-and-label</tspan>() : <tspan class="type">Text</tspan></tspan>
+    <tspan x="88" dy="30">  <tspan class="kw">with</tspan> &lt;<tspan class="type">State</tspan> <tspan class="scope">Counter</tspan> <tspan class="type">Int</tspan>&gt; <tspan class="kw">given</tspan> { clock: <tspan class="type">Clock</tspan> }</tspan>
+    <tspan x="88" dy="30">  <tspan class="kw">within</tspan> <tspan class="scope">Counter</tspan></tspan>
+    <tspan x="88" dy="30">    n = <tspan class="fn">get</tspan>()</tspan>
+    <tspan x="88" dy="30">    <tspan class="fn">put</tspan>(n <tspan class="op">+</tspan> 1)</tspan>
+    <tspan x="88" dy="30">    clock.<tspan class="prop">now</tspan> <tspan class="op">++</tspan> <tspan class="str">" count="</tspan> <tspan class="op">++</tspan> <tspan class="fn">show</tspan>(n <tspan class="op">+</tspan> 1)</tspan>
+  </text>
+</svg>
