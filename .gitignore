@@ -1,3 +1,4 @@
 /target/
 /editors/vscode-fx/node_modules/
 /editors/vscode-fx/out/
+.DS_Store
