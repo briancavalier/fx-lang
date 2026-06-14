@@ -122,7 +122,7 @@ The expected `given each` mapping is:
 
 ```fx
 with given each(
-  () -> { trace = start-trace() },
+  () -> { trace: start-trace() },
   context -> end-trace(context.trace)
 )
   action()

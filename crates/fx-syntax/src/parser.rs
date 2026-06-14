@@ -337,6 +337,8 @@ impl Parser {
             self.lambda_expr()
         } else if self.at_keyword(Keyword::Given) {
             self.given_expr(self.peek().span.start)
+        } else if self.at_ident_text("finally") {
+            self.finally_expr()
         } else if self.at_keyword(Keyword::With) {
             self.with_expr()
         } else if self.at_keyword(Keyword::Within) {
@@ -437,6 +439,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Match) => self.match_expr(),
             TokenKind::Keyword(Keyword::Handle) => self.handle_expr(),
             TokenKind::Keyword(Keyword::Within) => self.within_expr(),
+            TokenKind::Ident(text) if text == "finally" => self.finally_expr(),
             TokenKind::Keyword(Keyword::True) => {
                 let span = self.bump().span;
                 Expr::Bool { value: true, span }
@@ -504,8 +507,8 @@ impl Parser {
     fn given_expr(&mut self, start: usize) -> Expr {
         self.expect_keyword(Keyword::Given, "expected `given`");
         if self.at_ident_text("each") {
-            self.error_here("given each is not supported in Phase 5");
             self.bump();
+            return self.given_each_expr(start);
         }
         let fields = self.given_fields();
         self.expect_newline("expected newline after `given` provider");
@@ -514,6 +517,68 @@ impl Parser {
         self.expect(TokenKind::Dedent, "expected end of `given` body");
         let span = Span::new(start, body.span.end);
         Expr::Given { fields, body, span }
+    }
+
+    fn given_each_expr(&mut self, start: usize) -> Expr {
+        self.expect(TokenKind::LParen, "expected `(` after `given each`");
+        self.skip_delimited_ws();
+        let init = self.expr();
+        self.skip_delimited_ws();
+        let cleanup = if self.eat(TokenKind::Comma).is_some() {
+            self.skip_delimited_ws();
+            Some(Box::new(self.expr()))
+        } else {
+            None
+        };
+        self.skip_delimited_ws();
+        if self.eat(TokenKind::Comma).is_some() {
+            self.error_here("given each accepts at most initializer and cleanup arguments");
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                self.bump();
+            }
+        }
+        self.skip_delimited_ws();
+        self.expect(
+            TokenKind::RParen,
+            "expected `)` after `given each` arguments",
+        );
+        self.expect_newline("expected newline after `given each` provider");
+        self.expect(TokenKind::Indent, "expected indented `given each` body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of `given each` body");
+        let span = Span::new(start, body.span.end);
+        Expr::GivenEach {
+            init: Box::new(init),
+            cleanup,
+            body,
+            span,
+        }
+    }
+
+    fn finally_expr(&mut self) -> Expr {
+        let start = self
+            .expect_ident("expected `finally`")
+            .map(|name| name.span.start)
+            .unwrap_or_else(|| self.peek().span.start);
+        self.expect(TokenKind::LParen, "expected `(` after `finally`");
+        let cleanup = self.expr();
+        if self.eat(TokenKind::Comma).is_some() {
+            self.error_here("finally accepts exactly one cleanup argument");
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                self.bump();
+            }
+        }
+        self.expect(TokenKind::RParen, "expected `)` after `finally` cleanup");
+        self.expect_newline("expected newline after `finally` cleanup");
+        self.expect(TokenKind::Indent, "expected indented `finally` body");
+        let body = self.block();
+        self.expect(TokenKind::Dedent, "expected end of `finally` body");
+        let span = Span::new(start, body.span.end);
+        Expr::Finally {
+            cleanup: Box::new(cleanup),
+            body,
+            span,
+        }
     }
 
     fn given_fields(&mut self) -> Vec<FieldExpr> {

@@ -30,6 +30,7 @@ struct ModuleLowerer<'a, 'b> {
     typed_spans: &'b [TypedSpan],
     default_scopes: Vec<CoreExpr>,
     context_providers: Vec<BTreeMap<String, CoreExpr>>,
+    next_resource_provider: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,7 @@ impl CoreLowerer<'_> {
                     typed_spans,
                     default_scopes: Vec::new(),
                     context_providers: Vec::new(),
+                    next_resource_provider: 0,
                 }
                 .lower_module()
             })
@@ -464,6 +466,34 @@ impl ModuleLowerer<'_, '_> {
             Expr::Given { fields, body, .. } => {
                 return self.lower_given_expr(fields, body, expr.span(), locals, tail);
             }
+            Expr::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                return self.lower_given_each_expr(
+                    init,
+                    cleanup.as_deref(),
+                    body,
+                    expr.span(),
+                    locals,
+                    tail,
+                );
+            }
+            Expr::Finally { cleanup, body, .. } => {
+                let cleanup = self.lower_expr(cleanup, locals, TailPosition::NonTail);
+                let body = self.lower_block(body, &mut locals.clone(), tail);
+                return CoreExpr {
+                    ty,
+                    span: expr.span(),
+                    tail,
+                    kind: CoreExprKind::Finally {
+                        cleanup: Box::new(cleanup),
+                        body: Box::new(body),
+                    },
+                };
+            }
             Expr::Within { scope, body, .. } => {
                 let scope = self.lower_scope_name(scope, locals);
                 self.default_scopes.push(scope);
@@ -581,6 +611,99 @@ impl ModuleLowerer<'_, '_> {
         }
 
         lowered
+    }
+
+    fn lower_given_each_expr(
+        &mut self,
+        init: &Expr,
+        cleanup: Option<&Expr>,
+        body: &Block,
+        span: Span,
+        locals: &mut BTreeMap<String, Local>,
+        tail: TailPosition,
+    ) -> CoreExpr {
+        let syntax_provider_fields = given_each_provider_fields(init, self, locals);
+        let init = self.lower_expr(init, locals, TailPosition::NonTail);
+        let provider_ty = resource_initializer_result(&init.ty);
+        let provider_name = CoreLocalName(format!(
+            "__resource_context_{}",
+            self.next_resource_provider
+        ));
+        self.next_resource_provider += 1;
+        let provider_fields = {
+            let fields = record_fields(&provider_ty);
+            if fields.is_empty() {
+                syntax_provider_fields
+            } else {
+                fields
+            }
+        };
+
+        let mut body_locals = locals.clone();
+        let mut providers = BTreeMap::new();
+        for (name, ty) in &provider_fields {
+            body_locals.insert(name.clone(), Local { ty: ty.clone() });
+            providers.insert(
+                name.clone(),
+                CoreExpr {
+                    ty: ty.clone(),
+                    span,
+                    tail: TailPosition::NonTail,
+                    kind: CoreExprKind::Field {
+                        target: Box::new(CoreExpr {
+                            ty: provider_ty.clone(),
+                            span,
+                            tail: TailPosition::NonTail,
+                            kind: CoreExprKind::Local(provider_name.clone()),
+                        }),
+                        field: name.clone(),
+                    },
+                },
+            );
+        }
+        self.context_providers.push(providers);
+        let mut lowered_body = self.lower_block(body, &mut body_locals, tail);
+        self.context_providers.pop();
+
+        for (name, ty) in provider_fields.iter().rev() {
+            lowered_body = CoreExpr {
+                ty: lowered_body.ty.clone(),
+                span,
+                tail,
+                kind: CoreExprKind::Let {
+                    name: CoreLocalName(name.clone()),
+                    value: Box::new(CoreExpr {
+                        ty: ty.clone(),
+                        span,
+                        tail: TailPosition::NonTail,
+                        kind: CoreExprKind::Field {
+                            target: Box::new(CoreExpr {
+                                ty: provider_ty.clone(),
+                                span,
+                                tail: TailPosition::NonTail,
+                                kind: CoreExprKind::Local(provider_name.clone()),
+                            }),
+                            field: name.clone(),
+                        },
+                    }),
+                    body: Box::new(lowered_body),
+                },
+            };
+        }
+
+        let cleanup = cleanup
+            .map(|cleanup| Box::new(self.lower_expr(cleanup, locals, TailPosition::NonTail)));
+        CoreExpr {
+            ty: self.type_at(span),
+            span,
+            tail,
+            kind: CoreExprKind::GivenEach {
+                provider: provider_name,
+                init: Box::new(init),
+                cleanup,
+                body: Box::new(lowered_body),
+            },
+        }
     }
 
     fn lower_sugared_call(
@@ -1402,6 +1525,22 @@ impl ModuleLowerer<'_, '_> {
                     self.validate_effect_runtime(&return_clause.body);
                 }
             }
+            CoreExprKind::Finally { cleanup, body } => {
+                self.validate_effect_runtime(cleanup);
+                self.validate_effect_runtime(body);
+            }
+            CoreExprKind::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                self.validate_effect_runtime(init);
+                if let Some(cleanup) = cleanup {
+                    self.validate_effect_runtime(cleanup);
+                }
+                self.validate_effect_runtime(body);
+            }
             CoreExprKind::Let { value, body, .. } | CoreExprKind::Sequence { value, body } => {
                 self.validate_effect_runtime(value);
                 self.validate_effect_runtime(body);
@@ -1549,7 +1688,10 @@ fn lower_binary_op(op: BinaryOp) -> CoreBinaryOp {
 
 fn core_needs_effect_runtime(expr: &CoreExpr) -> bool {
     match &expr.kind {
-        CoreExprKind::Operation { .. } | CoreExprKind::Handle { .. } => true,
+        CoreExprKind::Operation { .. }
+        | CoreExprKind::Handle { .. }
+        | CoreExprKind::Finally { .. }
+        | CoreExprKind::GivenEach { .. } => true,
         CoreExprKind::Call { callee, args } => {
             core_returns_effectful(&callee.ty)
                 || core_needs_effect_runtime(callee)
@@ -1626,6 +1768,53 @@ fn core_closed_record(fields: Vec<(String, Type)>) -> Type {
             .collect(),
         tail: None,
     })
+}
+
+fn resource_initializer_result(ty: &Type) -> Type {
+    match ty {
+        Type::Function(_, result) => match result.as_ref() {
+            Type::Effectful { result, .. } => result.as_ref().clone(),
+            other => other.clone(),
+        },
+        Type::Effectful { result, .. } => result.as_ref().clone(),
+        other => other.clone(),
+    }
+}
+
+fn record_fields(ty: &Type) -> Vec<(String, Type)> {
+    match ty {
+        Type::Row(row) if row.kind == RowKind::Record => row
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                RowEntry::Field { name, ty } => Some((name.clone(), ty.clone())),
+                RowEntry::Case { .. } => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn given_each_provider_fields(
+    init: &Expr,
+    lowerer: &ModuleLowerer<'_, '_>,
+    locals: &BTreeMap<String, Local>,
+) -> Vec<(String, Type)> {
+    let Expr::Lambda { body, .. } = init else {
+        return Vec::new();
+    };
+    let Expr::Record { fields, .. } = body.result.as_ref() else {
+        return Vec::new();
+    };
+    fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.text.clone(),
+                lowerer.type_for_expr(&field.value, locals),
+            )
+        })
+        .collect()
 }
 
 fn first_scoped_effect_scope(ty: &Type, family: &str) -> Option<Type> {
@@ -2061,6 +2250,22 @@ export main() : Text
                         contains_context_record_call_to(&clause.body, callee_name, field)
                     })
             }
+            CoreExprKind::Finally { cleanup, body } => {
+                contains_context_record_call_to(cleanup, callee_name, field)
+                    || contains_context_record_call_to(body, callee_name, field)
+            }
+            CoreExprKind::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                contains_context_record_call_to(init, callee_name, field)
+                    || cleanup.as_ref().is_some_and(|cleanup| {
+                        contains_context_record_call_to(cleanup, callee_name, field)
+                    })
+                    || contains_context_record_call_to(body, callee_name, field)
+            }
             CoreExprKind::Operation { scoped, args, .. } => {
                 scoped.as_ref().is_some_and(|scoped| {
                     contains_context_record_call_to(&scoped.scope, callee_name, field)
@@ -2101,6 +2306,21 @@ export main() : Text
                     || return_clause
                         .as_ref()
                         .is_some_and(|clause| contains_tail_call_to(&clause.body, name))
+            }
+            CoreExprKind::Finally { cleanup, body } => {
+                contains_tail_call_to(cleanup, name) || contains_tail_call_to(body, name)
+            }
+            CoreExprKind::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                contains_tail_call_to(init, name)
+                    || cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| contains_tail_call_to(cleanup, name))
+                    || contains_tail_call_to(body, name)
             }
             CoreExprKind::Let { value, body, .. } => {
                 contains_tail_call_to(value, name) || contains_tail_call_to(body, name)

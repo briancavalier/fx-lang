@@ -15,11 +15,8 @@ Expected-passing fixtures:
   operation-site contextual insertion, not a provider visible only at the
   resume site.
 
-Goal-target fixture:
-
-- `resourceful-boundary.fx.txt` documents the future cleanup rule for
-  branch-local resourceful context. It intentionally uses unsupported `given
-  each` syntax and should not be included in passing `fx check` directory runs.
+The former resourceful-boundary goal target has been promoted to
+`examples/phase-6b/resourceful-boundary.fx`.
 
 Try the expected-passing examples:
 

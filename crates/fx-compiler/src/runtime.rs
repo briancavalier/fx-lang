@@ -122,6 +122,64 @@ const __fx = Object.freeze({
     });
   },
 
+  finalize(action, cleanup) {
+    return __fx.effect((outerHandler, continuation) => {
+      const runCleanup = (handler, value, finalContinuation) =>
+        __fx.runEffect(
+          cleanup(),
+          (request) => outerHandler({ ...request, __fx_cleanup: true }),
+          () => finalContinuation(value)
+        );
+
+      const cleanupAfterFailure = (handler, error) => {
+        try {
+          __fx.runEffect(
+            cleanup(),
+            (request) => outerHandler({ ...request, __fx_cleanup: true }),
+            () => undefined
+          );
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "fx cleanup failed");
+        }
+        throw error;
+      };
+
+      const localHandler = (request) => {
+        if (request.__fx_cleanup === true) {
+          return outerHandler(request);
+        }
+        let resumed = false;
+        const wrappedRequest = {
+          ...request,
+          resume(value) {
+            resumed = true;
+            try {
+              return __fx.runEffect(request.resume(value), localHandler, continuation);
+            } catch (error) {
+              return cleanupAfterFailure(localHandler, error);
+            }
+          },
+        };
+        const handled = outerHandler(wrappedRequest);
+        try {
+          return __fx.runEffect(handled, outerHandler, (value) =>
+            resumed ? continuation(value) : runCleanup(localHandler, value, continuation)
+          );
+        } catch (error) {
+          return cleanupAfterFailure(localHandler, error);
+        }
+      };
+
+      try {
+        return __fx.runEffect(action, localHandler, (value) =>
+          runCleanup(localHandler, value, continuation)
+        );
+      } catch (error) {
+        return cleanupAfterFailure(localHandler, error);
+      }
+    });
+  },
+
   run(computation) {
     return __fx.runEffect(
       computation,
@@ -237,6 +295,25 @@ console.log(__fx.run(program));
         );
 
         assert_eq!(output, "0");
+    }
+
+    #[test]
+    fn runtime_finalizes_nested_frames_in_lifo_order() {
+        let output = run_node(
+            r#"
+const log = [];
+const program = __fx.finalize(
+  __fx.finalize(
+    __fx.pure("body"),
+    () => { log.push("inner"); return __fx.pure(undefined); }
+  ),
+  () => { log.push("outer"); return __fx.pure(undefined); }
+);
+console.log(JSON.stringify({ value: __fx.run(program), log }));
+"#,
+        );
+
+        assert_eq!(output, r#"{"value":"body","log":["inner","outer"]}"#);
     }
 
     #[test]

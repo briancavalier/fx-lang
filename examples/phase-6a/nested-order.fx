@@ -18,10 +18,12 @@ inner(action: () -> Text with <Ask>) : Text
       value
 
 export main() : Text
-  first = with outer()
-    with inner()
-      ask()
-  second = with inner()
+  first =
     with outer()
-      ask()
+      with inner()
+        ask()
+  second =
+    with inner()
+      with outer()
+        ask()
   first ++ "/" ++ second

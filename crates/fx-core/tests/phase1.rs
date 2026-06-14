@@ -2259,6 +2259,73 @@ main() : Text
 }
 
 #[test]
+fn checks_phase_6b_resourceful_context_boundaries() {
+    let result = check_single(
+        "resource.fx",
+        r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+main() : Text
+  given each(() -> { clock: { now: "10:00" } }, context -> unit)
+    stamp(" started")
+
+plain-finally() : Text
+  finally(() -> unit)
+    "done"
+"#,
+    );
+
+    assert_eq!(result.diagnostics, []);
+}
+
+#[test]
+fn reports_phase_6b_resourceful_context_diagnostics() {
+    let bad_init = check_single(
+        "resource.fx",
+        r#"main() : Text
+  given each(() -> 1)
+    "bad"
+"#,
+    );
+    assert!(bad_init.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("given each initializer must return a context provider record")
+    }));
+
+    let bad_cleanup = check_single(
+        "resource.fx",
+        r#"main() : Text
+  given each(() -> { clock: "10:00" }, _context -> 1)
+    "bad"
+"#,
+    );
+    assert!(
+        bad_cleanup
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("expected `Unit`, found `Int`") })
+    );
+
+    let escaping = check_single(
+        "resource.fx",
+        r#"main() : Text
+  given each(() -> { clock: "10:00" })
+    clock
+"#,
+    );
+    assert!(escaping.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("branch-local context `clock` cannot escape")
+    }));
+}
+
+#[test]
 fn hovers_parameter_local_pattern_and_field_types() {
     let source_text = r#"type Todo = {
   id: Int,

@@ -23,13 +23,14 @@ depend on one written contract.
   already compiled into the suspended continuation.
 - Scoped handlers preserve exact family and scope identity through resumption.
   This keeps `within` elision consistent with explicit scoped operation calls.
-- Resourceful features need a separate branch-lifetime protocol before they
-  can be accepted. Phase 6A documents the protocol shape but does not add
-  `given each`, `finally`, fresh scopes, or static one-shot checking.
+- Resourceful features needed a separate branch-lifetime protocol before they
+  could be accepted. Phase 6A documents the protocol shape; Phase 6B promotes
+  `given each` and `finally` while fresh scopes and static one-shot checking
+  remain later work.
 
 ## Validation Notes
 
-- Keep `resourceful-boundary.fx.txt` out of directory-wide passing checks until
-  `given each` has real parser, checker, and runtime semantics.
+- The former `resourceful-boundary.fx.txt` goal target now lives under
+  `examples/phase-6b/resourceful-boundary.fx`.
 - If future changes alter the runtime handler protocol, re-run the Phase 6A
   compiler smoke tests before changing the semantic contract.

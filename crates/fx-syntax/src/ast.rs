@@ -290,6 +290,17 @@ pub enum Expr {
         body: Block,
         span: Span,
     },
+    GivenEach {
+        init: Box<Expr>,
+        cleanup: Option<Box<Expr>>,
+        body: Block,
+        span: Span,
+    },
+    Finally {
+        cleanup: Box<Expr>,
+        body: Block,
+        span: Span,
+    },
     Within {
         scope: Name,
         body: Block,
@@ -332,6 +343,8 @@ impl Expr {
             | Expr::Pipeline { span, .. }
             | Expr::With { span, .. }
             | Expr::Given { span, .. }
+            | Expr::GivenEach { span, .. }
+            | Expr::Finally { span, .. }
             | Expr::Within { span, .. }
             | Expr::Handle { span, .. }
             | Expr::Binary { span, .. }

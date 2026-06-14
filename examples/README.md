@@ -204,12 +204,32 @@ branch-lifetime semantic contract:
 - `phase-6a/scoped-resume.fx`
 - `phase-6a/operation-site-context.fx`
 
-`phase-6a/resourceful-boundary.fx.txt` is a goal target for future resourceful
-branch-local context. It intentionally uses unsupported `given each` syntax.
-
 Check and compile the expected-passing Phase 6A examples:
 
 ```sh
 cargo run -q -p fx-cli -- check examples/phase-6a
 cargo run -q -p fx-cli -- compile --target js examples/phase-6a
+```
+
+## Phase 6B
+
+Phase 6B examples exercise executable resourceful context and lifecycle
+cleanup:
+
+- `phase-6b/finally.fx`
+- `phase-6b/given-each.fx`
+- `phase-6b/given-each-cleanup.fx`
+- `phase-6b/repeated-resume.fx`
+- `phase-6b/non-resume-cleanup.fx`
+- `phase-6b/nested-lifo.fx`
+- `phase-6b/resourceful-boundary.fx`
+
+`phase-6b/diagnostics.fx.txt` documents expected diagnostics for invalid
+resourceful context forms and should not be included in passing directory runs.
+
+Check and compile the expected-passing Phase 6B examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-6b
+cargo run -q -p fx-cli -- compile --target js examples/phase-6b
 ```

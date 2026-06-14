@@ -533,13 +533,64 @@ call-site() : Text
     assert!(parsed.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("given each is not supported in Phase 5")
+            .contains("expected `(` after `given each`")
     }));
     assert!(parsed.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
             .contains("final given arguments are not supported in Phase 5")
     }));
+}
+
+#[test]
+fn parses_phase_6b_resourceful_boundaries() {
+    let parsed = parse_file(
+        r#"type Clock = {
+  now: Text
+}
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+plain-finally() : Text
+  finally(() -> unit)
+    "done"
+
+branch-context() : Text
+  given each(() -> { clock: { now: "10:00" } })
+    stamp(" started")
+
+branch-context-cleanup() : Text
+  given each(() -> { clock: { now: "10:00" } }, context -> unit)
+    stamp(" started")
+"#,
+    );
+
+    assert_eq!(parsed.diagnostics, []);
+    let Item::Value(finally_decl) = &parsed.module.items[2] else {
+        panic!("expected finally value declaration");
+    };
+    assert!(matches!(
+        finally_decl.body.result.as_ref(),
+        Expr::Finally { .. }
+    ));
+    let Item::Value(given_each_decl) = &parsed.module.items[3] else {
+        panic!("expected given each value declaration");
+    };
+    assert!(matches!(
+        given_each_decl.body.result.as_ref(),
+        Expr::GivenEach { cleanup: None, .. }
+    ));
+    let Item::Value(cleanup_decl) = &parsed.module.items[4] else {
+        panic!("expected given each cleanup value declaration");
+    };
+    assert!(matches!(
+        cleanup_decl.body.result.as_ref(),
+        Expr::GivenEach {
+            cleanup: Some(_),
+            ..
+        }
+    ));
 }
 
 #[test]

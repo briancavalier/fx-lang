@@ -1,0 +1,13 @@
+# Phase 6B diagnostics targets.
+
+bad-init() : Text
+  given each(() -> 1)
+    "bad"
+
+bad-cleanup() : Text
+  given each(() -> { clock: "10:00" }, _context -> 1)
+    "bad"
+
+escaping-context() : Text
+  given each(() -> { clock: "10:00" })
+    clock

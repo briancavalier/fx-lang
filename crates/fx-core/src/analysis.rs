@@ -338,6 +338,40 @@ fn local_definition_in_expr(
                 }
                 local_definition_in_block(body, byte_offset, &mut body_locals, module)
             }),
+        Expr::GivenEach {
+            init,
+            cleanup,
+            body,
+            ..
+        } => local_definition_in_expr(init, byte_offset, locals, module)
+            .or_else(|| {
+                let mut body_locals = locals.clone();
+                if let Expr::Lambda {
+                    body: init_body, ..
+                } = init.as_ref()
+                    && let Expr::Record { fields, .. } = init_body.result.as_ref()
+                {
+                    for field in fields {
+                        let definition = DefinitionInfo {
+                            module: module.name.clone(),
+                            path: module.path.clone(),
+                            span: field.name.span,
+                        };
+                        body_locals.insert(field.name.text.clone(), definition);
+                    }
+                }
+                local_definition_in_block(body, byte_offset, &mut body_locals, module)
+            })
+            .or_else(|| {
+                cleanup.as_ref().and_then(|cleanup| {
+                    local_definition_in_expr(cleanup, byte_offset, locals, module)
+                })
+            }),
+        Expr::Finally { cleanup, body, .. } => {
+            local_definition_in_expr(cleanup, byte_offset, locals, module).or_else(|| {
+                local_definition_in_block(body, byte_offset, &mut locals.clone(), module)
+            })
+        }
         Expr::Within { body, .. } => {
             local_definition_in_block(body, byte_offset, &mut locals.clone(), module)
         }

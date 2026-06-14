@@ -537,6 +537,13 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Pipeline { .. } => format_pipeline_expr(expr),
         Expr::With { targets, body, .. } => format_with_expr(targets, body),
         Expr::Given { fields, body, .. } => format_given_expr(fields, body),
+        Expr::GivenEach {
+            init,
+            cleanup,
+            body,
+            ..
+        } => format_given_each_expr(init, cleanup.as_deref(), body),
+        Expr::Finally { cleanup, body, .. } => format_finally_expr(cleanup, body),
         Expr::Within { scope, body, .. } => format_within_expr(scope, body),
         Expr::Handle {
             action,
@@ -677,6 +684,45 @@ fn format_given_expr(fields: &[FieldExpr], body: &Block) -> String {
     output
 }
 
+fn format_given_each_expr(init: &Expr, cleanup: Option<&Expr>, body: &Block) -> String {
+    let formatted_init = format_expr(init);
+    let formatted_cleanup = cleanup.map(format_expr);
+    let mut output = if formatted_init.contains('\n')
+        || formatted_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.contains('\n'))
+    {
+        let mut output = String::from("given each(\n");
+        output.push_str(&indent_text(&formatted_init, 1));
+        if let Some(cleanup) = &formatted_cleanup {
+            output.push('\n');
+            output.push_str("  ,\n");
+            output.push_str(&indent_text(cleanup, 1));
+        }
+        output.push('\n');
+        output.push(')');
+        output
+    } else {
+        let mut output = format!("given each({formatted_init}");
+        if let Some(cleanup) = &formatted_cleanup {
+            output.push_str(", ");
+            output.push_str(cleanup);
+        }
+        output.push(')');
+        output
+    };
+    output.push('\n');
+    output.push_str(&format_block(body, 1));
+    output
+}
+
+fn format_finally_expr(cleanup: &Expr, body: &Block) -> String {
+    let mut output = format!("finally({})", format_expr(cleanup));
+    output.push('\n');
+    output.push_str(&format_block(body, 1));
+    output
+}
+
 fn format_given_fields(fields: &[FieldExpr]) -> String {
     format!(
         "{{ {} }}",
@@ -780,6 +826,8 @@ fn is_inline_expr(expr: &Expr) -> bool {
         Expr::Match { .. }
             | Expr::With { .. }
             | Expr::Given { .. }
+            | Expr::GivenEach { .. }
+            | Expr::Finally { .. }
             | Expr::Within { .. }
             | Expr::Handle { .. }
     )

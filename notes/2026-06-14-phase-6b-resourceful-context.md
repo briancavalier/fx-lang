@@ -12,7 +12,7 @@ fresh per resumed branch and cleaned up when that branch exits:
 
 ```fx
 given each(
-  () -> { trace = start-trace() },
+  () -> { trace: start-trace() },
   context -> end-trace(context.trace)
 )
   action()
@@ -186,8 +186,8 @@ operation-site context.
 - diagnostics for invalid initializer result rows, cleanup arity/type
   mismatches, unsupported branch exits, and escaping branch-local context;
 - examples under `examples/phase-6b/`;
-- updates to `examples/phase-6a/resourceful-boundary.fx.txt` once the syntax is
-  supported.
+- promotion of the former Phase 6A resourceful-boundary goal target into
+  `examples/phase-6b/` once the syntax is supported.
 
 ## Defer
 
@@ -326,8 +326,8 @@ given each(init, cleanup)
 where `cleanup` is a value-level expression:
 
 - `finally(() -> close(file))`;
-- `given each(() -> { trace = start-trace() })`;
-- `given each(() -> { trace = start-trace() }, context -> end-trace(context.trace))`.
+- `given each(() -> { trace: start-trace() })`;
+- `given each(() -> { trace: start-trace() }, context -> end-trace(context.trace))`.
 
 Acceptance:
 

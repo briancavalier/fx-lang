@@ -5,7 +5,6 @@ export effect Choose
 
 choose-both(action: () -> Text with <Choose, ...e>) : Text with <...e>
   label = "branch:"
-
   handle action()
     choose(left, right, resume) ->
       label ++ resume(left) ++ "|" ++ label ++ resume(right)

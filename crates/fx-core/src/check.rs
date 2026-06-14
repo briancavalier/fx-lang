@@ -835,6 +835,8 @@ impl ModuleChecker<'_> {
             }
             Expr::With { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Given { .. } => self.check_inferred_expr(expr, env, expected),
+            Expr::GivenEach { .. } => self.check_inferred_expr(expr, env, expected),
+            Expr::Finally { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Within { .. } => self.check_inferred_expr(expr, env, expected),
             Expr::Handle { .. } => self.check_handle_expr(expr, env, expected),
             _ => self.check_inferred_expr(expr, env, expected),
@@ -1071,6 +1073,17 @@ impl ModuleChecker<'_> {
                 span,
             } => self.infer_with_expr(targets, body, *span, env),
             Expr::Given { fields, body, span } => self.infer_given_expr(fields, body, *span, env),
+            Expr::GivenEach {
+                init,
+                cleanup,
+                body,
+                span,
+            } => self.infer_given_each_expr(init, cleanup.as_deref(), body, *span, env),
+            Expr::Finally {
+                cleanup,
+                body,
+                span,
+            } => self.infer_finally_expr(cleanup, body, *span, env),
             Expr::Within { scope, body, .. } => {
                 let scope_ty = self.resolve_expr_name(&scope.text, scope.span, env, NameUse::Value);
                 self.add_typed_span(scope.span, TypedSpanKind::Scope, &scope.text, &scope_ty);
@@ -1372,6 +1385,172 @@ impl ModuleChecker<'_> {
                 .push(Diagnostic::new(span, "invalid context provider expression"));
         }
         found
+    }
+
+    fn infer_finally_expr(
+        &mut self,
+        cleanup: &Expr,
+        body: &Block,
+        _span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let cleanup_effects = self.check_cleanup_expr(cleanup, env, &[]);
+        let body_ty = self.infer_block(body, env);
+        let (body_ty, mut effects) = split_effectful(body_ty);
+        effects.extend(cleanup_effects);
+        attach_effects(body_ty, effects)
+    }
+
+    fn infer_given_each_expr(
+        &mut self,
+        init: &Expr,
+        cleanup: Option<&Expr>,
+        body: &Block,
+        span: Span,
+        env: &BTreeMap<String, Type>,
+    ) -> Type {
+        let init_result = self.check_zero_arg_resource_init(init, env);
+        let (provider_ty, mut effects) = split_effectful(init_result);
+        let provider_fields = match self.expand_alias(&provider_ty) {
+            Type::Row(row) if row.kind == RowKind::Record && row.tail.is_none() => row
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    RowEntry::Field { name, ty } => Some((name.clone(), ty.clone())),
+                    RowEntry::Case { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+            Type::Unknown => Vec::new(),
+            other => {
+                self.diagnostics.push(Diagnostic::new(
+                    init.span(),
+                    format!("given each initializer must return a context provider record, found `{other}`"),
+                ));
+                Vec::new()
+            }
+        };
+
+        if let Some(cleanup) = cleanup {
+            effects.extend(self.check_cleanup_expr(cleanup, env, &[provider_ty.clone()]));
+        }
+
+        let mut provider_env = BTreeMap::new();
+        let mut body_env = env.clone();
+        for (name, ty) in &provider_fields {
+            provider_env.insert(name.clone(), ty.clone());
+            body_env.insert(name.clone(), ty.clone());
+        }
+
+        self.context_providers.push(provider_env);
+        let body_ty = self.infer_block(body, &body_env);
+        self.context_providers.pop();
+        if let Expr::Name(name) = body.result.as_ref()
+            && provider_fields
+                .iter()
+                .any(|(provider_name, _)| provider_name == &name.text)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                name.span,
+                format!(
+                    "branch-local context `{}` cannot escape its `given each` boundary",
+                    name.text
+                ),
+            ));
+        }
+        let (body_ty, body_effects) = split_effectful(body_ty);
+        effects.extend(body_effects);
+        let found = attach_effects(body_ty, effects);
+        if matches!(found, Type::Unknown) {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "invalid resourceful context provider expression",
+            ));
+        }
+        found
+    }
+
+    fn check_zero_arg_resource_init(&mut self, init: &Expr, env: &BTreeMap<String, Type>) -> Type {
+        let Expr::Lambda { params, body, .. } = init else {
+            let ty = self.check_expr(
+                init,
+                env,
+                &Type::Function(Vec::new(), Box::new(Type::Unknown)),
+            );
+            if let Type::Function(params, result) = self.expand_alias(&ty) {
+                if !params.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        init.span(),
+                        format!(
+                            "given each initializer must accept 0 arguments, found {}",
+                            params.len()
+                        ),
+                    ));
+                }
+                return *result;
+            }
+            return Type::Unknown;
+        };
+        if !params.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                init.span(),
+                format!(
+                    "given each initializer must accept 0 arguments, found {}",
+                    params.len()
+                ),
+            ));
+        }
+        let init_env = env.clone();
+        let result = self.infer_block(body, &init_env);
+        self.add_typed_span(
+            init.span(),
+            TypedSpanKind::Value,
+            "given each initializer",
+            &Type::Function(Vec::new(), Box::new(result.clone())),
+        );
+        result
+    }
+
+    fn check_cleanup_expr(
+        &mut self,
+        expr: &Expr,
+        env: &BTreeMap<String, Type>,
+        param_types: &[Type],
+    ) -> EffectRowType {
+        let Expr::Lambda { params, body, .. } = expr else {
+            let expected = Type::Function(param_types.to_vec(), Box::new(Type::Unit));
+            let ty = self.check_expr(expr, env, &expected);
+            let (_, effects) = split_effectful(ty);
+            return effects;
+        };
+        if params.len() != param_types.len() {
+            self.diagnostics.push(Diagnostic::new(
+                expr.span(),
+                format!(
+                    "cleanup arity mismatch: expected {} parameters, found {}",
+                    param_types.len(),
+                    params.len()
+                ),
+            ));
+        }
+        let mut lambda_env = env.clone();
+        for (index, param) in params.iter().enumerate() {
+            if let Some(name) = &param.name {
+                let ty = param_types.get(index).cloned().unwrap_or(Type::Unknown);
+                self.add_typed_span(name.span, TypedSpanKind::Parameter, &name.text, &ty);
+                lambda_env.insert(name.text.clone(), ty);
+            }
+        }
+        let ty = self.infer_block(body, &lambda_env);
+        let (result, effects) = split_effectful(ty);
+        if !self.compatible(&result, &Type::Unit) {
+            let message = self.compatibility_message(
+                &result,
+                &Type::Unit,
+                format!("expected `Unit`, found `{result}`"),
+            );
+            self.diagnostics.push(Diagnostic::new(body.span, message));
+        }
+        effects
     }
 
     fn infer_block(&mut self, block: &Block, env: &BTreeMap<String, Type>) -> Type {

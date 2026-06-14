@@ -755,6 +755,129 @@ fn phase_6a_operation_site_context_fixture_executes() {
     assert_eq!(output, "operation-left/operation-right");
 }
 
+#[test]
+fn phase_6b_finally_cleans_up_on_success_and_lifo() {
+    let output = compile_and_run_main(
+        "phase_6b_finally_lifo",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"effect Emit
+  emit(value: Text) : Unit
+
+collect(action: () -> Text with <Emit>) : Text
+  handle action()
+    emit(value, resume) ->
+      resume(unit) ++ value
+
+    return(value) ->
+      value
+
+export main() : Text
+  with collect()
+    finally(() -> emit("outer"))
+      finally(() -> emit("inner"))
+        "body"
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "bodyouterinner");
+}
+
+#[test]
+fn phase_6b_finally_cleans_up_on_non_resume() {
+    let output = compile_and_run_main(
+        "phase_6b_finally_non_resume",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"effect Emit
+  emit(value: Text) : Unit
+
+effect Stop
+  stop() : Text
+
+collect(action: () -> Text with <Emit, Stop>) : Text
+  handle action()
+    emit(value, resume) ->
+      resume(unit) ++ value
+
+    stop(_resume) ->
+      "stopped"
+
+    return(value) ->
+      value
+
+export main() : Text
+  with collect()
+    finally(() -> emit(":cleanup"))
+      stop()
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(output, "stopped:cleanup");
+}
+
+#[test]
+fn phase_6b_given_each_installs_context_and_cleans_up_each_resume() {
+    let output = compile_and_run_main(
+        "phase_6b_given_each_resume",
+        "smoke",
+        vec![source(
+            "smoke/main.fx",
+            r#"type Clock = {
+  now: Text
+}
+
+effect Emit
+  emit(value: Text) : Unit
+
+effect Choose
+  choose(left: Text, right: Text) : Text
+
+stamp(message: Text) : Text given { clock: Clock }
+  clock.now ++ message
+
+collect(action: () -> Text with <Emit, Choose>) : Text
+  handle action()
+    emit(value, resume) ->
+      resume(unit) ++ value
+
+    choose(left, right, resume) ->
+      resume(left) ++ "|" ++ resume(right)
+
+    return(value) ->
+      value
+
+export main() : Text
+  with collect()
+    choice = choose("left", "right")
+    given each(
+      () ->
+        emit("setup:")
+        { clock: { now: "branch-" } }
+      ,
+      context -> emit(":cleanup")
+    )
+      stamp(choice)
+"#,
+        )],
+        "main",
+        "main",
+    );
+
+    assert_eq!(
+        output,
+        "branch-left:cleanupsetup:|branch-right:cleanupsetup:"
+    );
+}
+
 fn compile_and_run_main(
     prefix: &str,
     root: &str,

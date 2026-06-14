@@ -258,7 +258,9 @@ impl<'a> ExprEmitter<'a> {
                 "__fx.run({})",
                 self.perform(operation, scoped.as_ref(), args)
             ),
-            CoreExprKind::Handle { .. } => format!("__fx.run({})", self.computation(expr)),
+            CoreExprKind::Handle { .. }
+            | CoreExprKind::Finally { .. }
+            | CoreExprKind::GivenEach { .. } => format!("__fx.run({})", self.computation(expr)),
             CoreExprKind::Record { fields } => self.record(fields),
             CoreExprKind::Field { target, field } => {
                 format!("{}[{}]", self.expr(target), string_literal(field))
@@ -376,6 +378,31 @@ impl<'a> ExprEmitter<'a> {
                     return_body
                 )
             }
+            CoreExprKind::Finally { cleanup, body } => {
+                format!(
+                    "__fx.finalize({}, () => {})",
+                    self.computation(body),
+                    self.call_zero(cleanup)
+                )
+            }
+            CoreExprKind::GivenEach {
+                provider,
+                init,
+                cleanup,
+                body,
+            } => {
+                let provider = local_identifier(provider);
+                let cleanup = cleanup
+                    .as_ref()
+                    .map(|cleanup| format!("{}({provider})", self.expr(cleanup)))
+                    .unwrap_or_else(|| "__fx.pure(undefined)".to_string());
+                format!(
+                    "__fx.bind({}, ({provider}) => __fx.finalize({}, () => {}))",
+                    self.call_zero(init),
+                    self.computation(body),
+                    cleanup
+                )
+            }
             CoreExprKind::Let { name, value, body } => {
                 if needs_effect_runtime(value) {
                     format!(
@@ -490,6 +517,10 @@ impl<'a> ExprEmitter<'a> {
         } else {
             format!("__fx.perform({}, [{}])", operation_key(operation), payload)
         }
+    }
+
+    fn call_zero(&mut self, callee: &CoreExpr) -> String {
+        format!("{}()", self.expr(callee))
     }
 
     fn match_expr(&mut self, scrutinee: &CoreExpr, arms: &[CoreMatchArm]) -> String {
@@ -615,7 +646,10 @@ impl<'a> ExprEmitter<'a> {
 
 fn needs_effect_runtime(expr: &CoreExpr) -> bool {
     match &expr.kind {
-        CoreExprKind::Operation { .. } | CoreExprKind::Handle { .. } => true,
+        CoreExprKind::Operation { .. }
+        | CoreExprKind::Handle { .. }
+        | CoreExprKind::Finally { .. }
+        | CoreExprKind::GivenEach { .. } => true,
         CoreExprKind::Call { callee, args } => {
             returns_effectful(&callee.ty)
                 || needs_effect_runtime(callee)

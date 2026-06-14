@@ -1,8 +1,6 @@
 # Phase 6A: resume-site providers do not rewrite operation-site context.
 
-type Clock = {
-  now: Text
-}
+type Clock = { now: Text }
 
 export effect Choose
   choose(left: Text, right: Text) : Text

@@ -762,7 +762,7 @@ Resourceful branch-local context:
 
 ```fx
 with given each(
-  () -> { trace = start-trace() },
+  () -> { trace: start-trace() },
   context -> end-trace(context.trace)
 )
   with choose()
@@ -782,7 +782,7 @@ for the original action and each resumed branch:
 For non-resourceful branch-local values, cleanup can be omitted:
 
 ```fx
-with given each(() -> { trace-id = new-trace-id() })
+with given each(() -> { trace-id: new-trace-id() })
   with choose()
     render-page()
 ```
@@ -808,7 +808,7 @@ Example provider:
 ```fx
 with-trace(action: () -> a given { trace: Trace, ...c }) : a given { ...c }
   with given each(
-    () -> { trace = start-trace() },
+    () -> { trace: start-trace() },
     context -> end-trace(context.trace)
   )
     action()
@@ -820,7 +820,7 @@ This keeps the two common cases visually distinct:
 with given { request = request-context }
   action()
 
-with given each(() -> { trace = start-trace() }, context -> end-trace(context.trace))
+with given each(() -> { trace: start-trace() }, context -> end-trace(context.trace))
   action()
 ```
 
@@ -842,7 +842,7 @@ Branch-local resourceful provider:
 ```fx
 with-trace(action: () -> a given { trace: Trace, ...c }) : a given { ...c }
   with given each(
-    () -> { trace = start-trace() },
+    () -> { trace: start-trace() },
     context -> end-trace(context.trace)
   )
     action()

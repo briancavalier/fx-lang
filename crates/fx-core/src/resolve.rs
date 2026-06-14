@@ -302,6 +302,32 @@ impl ModuleResolver<'_> {
                 }
                 self.resolve_block(body, &mut body_locals);
             }
+            Expr::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                self.resolve_expr(init, locals);
+                let mut body_locals = locals.clone();
+                if let Expr::Lambda {
+                    body: init_body, ..
+                } = init.as_ref()
+                    && let Expr::Record { fields, .. } = init_body.result.as_ref()
+                {
+                    for field in fields {
+                        body_locals.insert(field.name.text.clone());
+                    }
+                }
+                self.resolve_block(body, &mut body_locals);
+                if let Some(cleanup) = cleanup {
+                    self.resolve_expr(cleanup, locals);
+                }
+            }
+            Expr::Finally { cleanup, body, .. } => {
+                self.resolve_expr(cleanup, locals);
+                self.resolve_block(body, &mut locals.clone());
+            }
             Expr::Within { scope, body, .. } => {
                 if !locals.contains(scope.text.as_str()) {
                     self.resolve_symbol_name(&scope.text, scope.span, Some(SymbolKind::Scope));

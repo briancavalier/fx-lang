@@ -124,6 +124,16 @@ pub enum CoreExprKind {
         clauses: Vec<CoreHandlerClause>,
         return_clause: Option<CoreHandlerReturnClause>,
     },
+    Finally {
+        cleanup: Box<CoreExpr>,
+        body: Box<CoreExpr>,
+    },
+    GivenEach {
+        provider: CoreLocalName,
+        init: Box<CoreExpr>,
+        cleanup: Option<Box<CoreExpr>>,
+        body: Box<CoreExpr>,
+    },
     Record {
         fields: Vec<CoreRecordField>,
     },
@@ -346,6 +356,22 @@ impl CoreExpr {
                     return_clause.body.push_debug(output, indent + 1);
                 }
             }
+            CoreExprKind::Finally { cleanup, body } => {
+                cleanup.push_debug(output, indent + 1);
+                body.push_debug(output, indent + 1);
+            }
+            CoreExprKind::GivenEach {
+                init,
+                cleanup,
+                body,
+                ..
+            } => {
+                init.push_debug(output, indent + 1);
+                if let Some(cleanup) = cleanup {
+                    cleanup.push_debug(output, indent + 1);
+                }
+                body.push_debug(output, indent + 1);
+            }
             CoreExprKind::Record { fields } | CoreExprKind::RecordUpdate { fields, .. } => {
                 for field in fields {
                     field.value.push_debug(output, indent + 1);
@@ -404,6 +430,8 @@ impl CoreExprKind {
             CoreExprKind::Call { .. } => "call",
             CoreExprKind::Operation { .. } => "operation",
             CoreExprKind::Handle { .. } => "handle",
+            CoreExprKind::Finally { .. } => "finally",
+            CoreExprKind::GivenEach { .. } => "given-each",
             CoreExprKind::Record { .. } => "record",
             CoreExprKind::Field { .. } => "field",
             CoreExprKind::RecordUpdate { .. } => "record-update",
