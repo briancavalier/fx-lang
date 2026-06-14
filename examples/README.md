@@ -173,3 +173,43 @@ Try all Phase 4 examples once implementation begins:
 ```sh
 cargo run -q -p fx-cli -- check examples/phase-4
 ```
+
+## Phase 5
+
+Phase 5 examples exercise coeffects and lexical `given` providers:
+
+- `phase-5/basic.fx`
+- `phase-5/effects.fx`
+- `phase-5/higher-order.fx`
+- `phase-5/with-clock.fx`
+
+`phase-5/diagnostics.fx.txt` documents expected diagnostics for unsupported
+or invalid Phase 5 forms and should not be included in passing directory runs.
+
+Check all expected-passing Phase 5 examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-5
+```
+
+## Phase 6A
+
+Phase 6A examples document the handler, resumption, operation-site context, and
+branch-lifetime semantic contract:
+
+- `phase-6a/resume-once.fx`
+- `phase-6a/resume-twice.fx`
+- `phase-6a/non-resume.fx`
+- `phase-6a/nested-order.fx`
+- `phase-6a/scoped-resume.fx`
+- `phase-6a/operation-site-context.fx`
+
+`phase-6a/resourceful-boundary.fx.txt` is a goal target for future resourceful
+branch-local context. It intentionally uses unsupported `given each` syntax.
+
+Check and compile the expected-passing Phase 6A examples:
+
+```sh
+cargo run -q -p fx-cli -- check examples/phase-6a
+cargo run -q -p fx-cli -- compile --target js examples/phase-6a
+```

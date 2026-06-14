@@ -665,6 +665,96 @@ export main() : Text
     assert_eq!(output, "10:00/10:00!");
 }
 
+#[test]
+fn phase_6a_resume_once_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_resume_once",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/resume-once.fx",
+            include_str!("../../../examples/phase-6a/resume-once.fx"),
+        )],
+        "resume-once",
+    );
+
+    assert_eq!(output, "xx");
+}
+
+#[test]
+fn phase_6a_resume_twice_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_resume_twice",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/resume-twice.fx",
+            include_str!("../../../examples/phase-6a/resume-twice.fx"),
+        )],
+        "resume-twice",
+    );
+
+    assert_eq!(output, "branch:left|branch:right");
+}
+
+#[test]
+fn phase_6a_non_resume_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_non_resume",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/non-resume.fx",
+            include_str!("../../../examples/phase-6a/non-resume.fx"),
+        )],
+        "non-resume",
+    );
+
+    assert_eq!(output, "stopped:done");
+}
+
+#[test]
+fn phase_6a_nested_order_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_nested_order",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/nested-order.fx",
+            include_str!("../../../examples/phase-6a/nested-order.fx"),
+        )],
+        "nested-order",
+    );
+
+    assert_eq!(output, "inner/outer");
+}
+
+#[test]
+fn phase_6a_scoped_resume_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_scoped_resume",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/scoped-resume.fx",
+            include_str!("../../../examples/phase-6a/scoped-resume.fx"),
+        )],
+        "scoped-resume",
+    );
+
+    assert_eq!(output, "42");
+}
+
+#[test]
+fn phase_6a_operation_site_context_fixture_executes() {
+    let output = compile_and_run_module_directly(
+        "phase_6a_operation_site_context",
+        "examples/phase-6a",
+        vec![source(
+            "examples/phase-6a/operation-site-context.fx",
+            include_str!("../../../examples/phase-6a/operation-site-context.fx"),
+        )],
+        "operation-site-context",
+    );
+
+    assert_eq!(output, "operation-left/operation-right");
+}
+
 fn compile_and_run_main(
     prefix: &str,
     root: &str,

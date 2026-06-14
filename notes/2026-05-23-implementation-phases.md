@@ -695,6 +695,16 @@ Tooling success criteria:
 Goal: fill in power features after the core language, rows, effects, scopes,
 and coeffects are usable.
 
+### Phase 6A: Handler and lifetime semantics
+
+Start Phase 6 by documenting and validating the semantic contract for handlers,
+resumptions, operation-site context, and branch lifetimes. This should happen
+before resourceful context, fresh scopes, structured concurrency, or richer
+handler forms rely on those semantics.
+
+The detailed Phase 6A plan is in
+`notes/2026-06-13-phase-6a-handler-lifetime-semantics.md`.
+
 Candidates:
 
 - variadic tuple packs;

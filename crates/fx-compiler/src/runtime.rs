@@ -262,6 +262,77 @@ console.log(__fx.run(program));
     }
 
     #[test]
+    fn runtime_uses_deep_handler_for_resumed_continuations() {
+        let output = run_node(
+            r#"
+const action = __fx.bind(__fx.perform("main.ask", []), (first) =>
+  __fx.bind(__fx.perform("main.ask", []), (second) => __fx.pure(first + second))
+);
+const program = __fx.handle(action, {
+  operations: {
+    "main.ask": (resume) => resume("x"),
+  },
+  return(value) {
+    return __fx.pure(value);
+  },
+});
+console.log(__fx.run(program));
+"#,
+        );
+
+        assert_eq!(output, "xx");
+    }
+
+    #[test]
+    fn runtime_supports_multiple_resumptions() {
+        let output = run_node(
+            r#"
+const program = __fx.handle(
+  __fx.perform("main.choose", ["left", "right"]),
+  {
+    operations: {
+      "main.choose": (left, right, resume) => __fx.pure(resume(left) + "|" + resume(right)),
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+console.log(__fx.run(program));
+"#,
+        );
+
+        assert_eq!(output, "left|right");
+    }
+
+    #[test]
+    fn runtime_forwards_unhandled_requests_to_outer_handler() {
+        let output = run_node(
+            r#"
+const program = __fx.handle(
+  __fx.handle(__fx.perform("main.ask", []), {
+    operations: {},
+    return(value) {
+      return __fx.pure(value);
+    },
+  }),
+  {
+    operations: {
+      "main.ask": (resume) => resume("outer"),
+    },
+    return(value) {
+      return __fx.pure(value);
+    },
+  },
+);
+console.log(__fx.run(program));
+"#,
+        );
+
+        assert_eq!(output, "outer");
+    }
+
+    #[test]
     fn runtime_matches_scoped_requests_by_family_and_scope() {
         let output = run_node(
             r#"
