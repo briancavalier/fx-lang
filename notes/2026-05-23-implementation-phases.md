@@ -705,6 +705,17 @@ handler forms rely on those semantics.
 The detailed Phase 6A plan is in
 `notes/2026-06-13-phase-6a-handler-lifetime-semantics.md`.
 
+### Phase 6B: Resourceful context
+
+After Phase 6A has pinned down branch lifetimes, add executable resourceful
+context and lifecycle cleanup. This phase should implement `given each` for
+branch-local contextual values and `finally` for generic cleanup, while still
+deferring fresh scopes, non-escape checking for generated scopes, scope masking,
+and structured concurrency.
+
+The detailed Phase 6B plan is in
+`notes/2026-06-14-phase-6b-resourceful-context.md`.
+
 Candidates:
 
 - variadic tuple packs;
